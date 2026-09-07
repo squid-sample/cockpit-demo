@@ -1,0 +1,36 @@
+package demo
+
+typeCollection MyTypes {
+    version { major 1 minor 0 }
+
+    enumeration PowerState {
+        OFF = 0,
+        STR = 1,
+        ACTIVE = 2
+    }
+}
+
+interface HelloWorld {
+    version { major 1 minor 0 }
+
+    method sayHello {
+        in {
+            String name
+        }
+        out {
+            String message
+        }
+    }
+
+    method getPowerState {
+        out {
+            MyTypes.PowerState status
+        }
+    }
+
+    broadcast NotifyPowerState {
+        out {
+            MyTypes.PowerState status
+        }
+    }
+}

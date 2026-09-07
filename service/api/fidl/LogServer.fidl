@@ -1,0 +1,83 @@
+package logserver
+
+typeCollection LogTypes {
+    version { major 1 minor 0 }
+
+    enumeration LogLevel {
+        DEBUG = 0,
+        INFO = 1,
+        WARN = 2,
+        ERROR = 3,
+        FATAL = 4
+    }
+
+    enumeration LogSourceType {
+        SYS = 0,
+        APP = 1,
+        KERN = 2,
+        MCU = 3
+    }
+
+    enumeration ExportResult {
+        SUCCESS = 0,
+        FAILED = 1,
+        NO_USB = 2,
+        NO_FLAG = 3
+    }
+
+    struct LogSettings {
+        UInt32 rollPeriod;
+        UInt32 retainDays;
+        UInt32 maxFileSize;
+        LogLevel minLogLevel;
+        UInt32 enabledSources;
+        String logPath;
+        String usbMountPoint;
+        String usbExportDir;
+    }
+
+    struct LogFileInfo {
+        String fileName;
+        UInt64 fileSize;
+        UInt64 createTime;
+        LogSourceType sourceType;
+    }
+}
+
+interface LogServer {
+    version { major 1 minor 0 }
+
+    method getLogSettings {
+        out {
+            LogTypes.LogSettings settings
+        }
+    }
+
+    method setLogSettings {
+        in {
+            LogTypes.LogSettings settings
+        }
+        out {
+            Boolean success
+        }
+    }
+
+    method exportLog {
+        in {
+            LogTypes.LogSourceType sourceType
+            String startTime
+            String endTime
+            String targetPath
+        }
+        out {
+            LogTypes.ExportResult result
+            String exportedFile
+        }
+    }
+
+    broadcast NotifyLogFileCreated {
+        out {
+            LogTypes.LogFileInfo fileInfo
+        }
+    }
+}

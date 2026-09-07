@@ -1,0 +1,37 @@
+import "platform:/plugin/org.genivi.commonapi.someip/deployment/CommonAPI-4-SOMEIP_deployment_spec.fdepl"
+import "LogServer.fidl"
+
+define org.genivi.commonapi.someip.deployment for interface logserver.LogServer {
+    SomeIpServiceID = 0x1112
+
+    method getLogSettings {
+        SomeIpMethodID = 0x0001
+        SomeIpReliable = true
+    }
+
+    method setLogSettings {
+        SomeIpMethodID = 0x0002
+        SomeIpReliable = true
+    }
+
+    method exportLog {
+        SomeIpMethodID = 0x0003
+        SomeIpReliable = true
+    }
+
+    broadcast NotifyLogFileCreated {
+        SomeIpEventID    = 0x8001
+        SomeIpReliable   = false
+        SomeIpEventGroups = { 0x01 }
+    }
+}
+
+define org.genivi.commonapi.someip.deployment for provider as LogServerProvider {
+    instance logserver.LogServer {
+        InstanceId = "logserver.LogServer"
+        SomeIpInstanceID = 0x2223
+        SomeIpUnicastAddress = "192.168.0.2"
+        SomeIpReliableUnicastPort = 30500
+        SomeIpUnreliableUnicastPort = 30500
+    }
+}
