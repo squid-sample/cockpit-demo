@@ -121,9 +121,11 @@ class CryptoTracker:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(self.state, f, ensure_ascii=False, indent=2)
 
-    def record_trade(self, text):
+    def record_trade(self, symbol, text):
         self.state["trades"].append({
-            "time": dt.datetime.now().strftime("%Y-%m-%d %H:%M"), "text": text})
+            "time": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "symbol": symbol,
+            "text": text})
 
     def run_once(self):
         quotes = {}
@@ -255,10 +257,11 @@ class CryptoTracker:
         pos["tranches_done"][index] = True
         done = sum(pos["tranches_done"])
         total = len(pos["tranches_done"])
-        msg = "第{idx}批建仓 {pct:.0f}%：买入 {amount:.2f} 枚 @{price:.4f}，金额 {spend:.0f} USDT（已建仓 {done}/{total} 批，均价 {avg:.4f}）".format(
-            idx=index + 1, pct=tranche["pct"] * 100, amount=amount, price=price,
+        coin = PLANS[symbol]["name"]
+        msg = "{} 第{idx}批建仓 {pct:.0f}%：买入 {amount:.2f} 枚 @{price:.4f}，金额 {spend:.0f} USDT（已建仓 {done}/{total} 批，均价 {avg:.4f}）".format(
+            coin, idx=index + 1, pct=tranche["pct"] * 100, amount=amount, price=price,
             spend=spend, done=done, total=total, avg=pos["cost"] / pos["amount"])
-        self.record_trade(msg)
+        self.record_trade(symbol, msg)
         return msg
 
     KIND_STYLE = {
@@ -325,7 +328,7 @@ class CryptoTracker:
         pnl = proceeds - cost_part
         msg = "{} {}，卖出 {:.2f} 枚 @{:.4f}，本批盈亏 {:+.2f} USDT".format(
             reason, PLANS[symbol]["name"], amount, price, pnl)
-        self.record_trade(msg)
+        self.record_trade(symbol, msg)
         if pos["amount"] < 1e-8:
             del self.state["positions"][symbol]
         return "【模拟成交】" + msg
@@ -409,9 +412,11 @@ class CryptoTracker:
         else:
             lines.append("| 无持仓 | - | - | - | - | - | - | - |")
 
-        lines += ["", "## 交易记录", ""]
+        lines += ["", "## 交易记录", "", "| 时间 | 币种 | 记录 |", "|---|---|---|"]
         for t in self.state["trades"][-30:]:
-            lines.append("- {}：{}".format(t["time"], t["text"]))
+            symbol = t.get("symbol", "")
+            coin = PLANS.get(symbol, {}).get("name", symbol or "-")
+            lines.append("| {} | {} | {} |".format(t["time"], coin, t["text"]))
 
         with open(REPORT_FILE, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
