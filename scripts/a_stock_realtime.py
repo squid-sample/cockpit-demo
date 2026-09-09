@@ -8,30 +8,27 @@ import tkinter as tk
 from tkinter import ttk
 
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PLAN_ROOT = os.path.join(BASE_DIR, "stock_plans")
+with open(os.path.join(PLAN_ROOT, "active_plan.txt"), "r", encoding="utf-8") as file:
+    ACTIVE_PLAN_ID = file.read().strip()
+PLAN_DIR = os.path.join(PLAN_ROOT, ACTIVE_PLAN_ID)
+with open(os.path.join(PLAN_DIR, "plan.json"), "r", encoding="utf-8") as file:
+    PLAN_CONFIG = json.load(file)
+
 REFRESH_MS = 5000
 SIM_POLL_MS = 60000
 TRANSPARENT_COLOR = "#ff00ff"
-SIM_STATE_FILE = os.path.join(os.path.dirname(__file__), "stock_simulation_state.json")
-SIM_REPORT_FILE = os.path.join(os.path.dirname(__file__), "stock_simulation_report.md")
-SIM_REPORT_ARCHIVE_DIR = os.path.join(os.path.dirname(__file__), "stock_reports")
-SIM_CAPITAL = 100000.0
-SIM_DAYS = 30
-PLAN_ID = "2026年第01期"  # 每次重新制定推荐计划时递增，例如 2026年第02期
-PLAN_DATE = "2026-09-07"
+SIM_STATE_FILE = os.path.join(PLAN_DIR, "state.json")
+SIM_REPORT_FILE = os.path.join(PLAN_DIR, "report.md")
+SIM_REPORT_ARCHIVE_DIR = os.path.join(BASE_DIR, "stock_reports")
+SIM_CAPITAL = float(PLAN_CONFIG["capital"])
+SIM_DAYS = int(PLAN_CONFIG["valid_days"])
+PLAN_ID = PLAN_CONFIG["plan_id"]
+PLAN_DATE = PLAN_CONFIG["plan_date"]
 PUSHPLUS_TOKEN = "e39674189a874c48888292f80e0c3464"
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
-def month_cycle(date_text):
-    day = dt.date.fromisoformat(date_text) if date_text else dt.date.today()
-    start = day.replace(day=1)
-    end = (day.replace(day=28) + dt.timedelta(days=4)).replace(day=1) - dt.timedelta(days=1)
-    return "{}年第{:02d}期".format(day.year, day.month), start, end
-
-
-SIM_PLANS = {
-    "sh601138": {"name": "工业富联", "buy_low": 62.8, "buy_high": 64.0, "stop": 61.5, "tp1": 68.0, "tp2": 70.0},
-    "sh601899": {"name": "紫金矿业", "buy_low": 32.4, "buy_high": 33.0, "stop": 31.6, "tp1": 35.0, "tp2": 35.8},
-    "sh603259": {"name": "药明康德", "buy_low": 150.0, "buy_high": 153.0, "stop": 146.0, "tp1": 161.0, "tp2": 166.0},
-}
+SIM_PLANS = PLAN_CONFIG["plans"]
 
 
 def normalize_code(code: str) -> str:
@@ -443,6 +440,32 @@ class SimulationTracker:
             "|---|---|---|---:|---|---|---|---:|---|",
         ]
         lines.extend(plan_lines)
+        lines.extend([
+            "",
+            "## 实时行情与计划状态", "",
+            "| 股票 | 代码 | 最新价 | 24h涨跌 | 计划状态 |",
+            "|---|---:|---:|---:|---|",
+        ])
+        for code, plan in SIM_PLANS.items():
+            quote = quotes.get(code)
+            if not quote:
+                lines.append("| {} | {} | - | - | 暂无行情 |".format(plan["name"], code[-6:]))
+                continue
+            current = quote["current"]
+            if current <= plan["stop"]:
+                status = "已到止损位"
+            elif current >= plan["tp2"]:
+                status = "已到止盈2"
+            elif current >= plan["tp1"]:
+                status = "已到止盈1"
+            elif current < plan["buy_low"]:
+                status = "低于买入区间"
+            elif current <= plan["buy_high"]:
+                status = "买入区间内"
+            else:
+                status = "高于买入区间，等回调"
+            lines.append("| {} | {} | {:.2f} | {:+.2f}% | {} |".format(
+                plan["name"], code[-6:], current, quote["pct"], status))
         lines.extend([
             "",
             "## 当前持仓", "",

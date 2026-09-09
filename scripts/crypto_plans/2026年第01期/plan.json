@@ -1,0 +1,56 @@
+{
+  "plan_id": "2026年第01期",
+  "plan_date": "2026-09-07",
+  "valid_days": 10,
+  "capital": 100000.0,
+  "plans": {
+    "LINKUSDT": {
+      "name": "LINK（Chainlink）",
+      "tranches": [
+        {"price": 12.7, "pct": 0.5},
+        {"price": 12.4, "pct": 0.3},
+        {"price": 12.1, "pct": 0.2}
+      ],
+      "stop": 11.7,
+      "tp1": 14.2,
+      "tp2": 15.0,
+      "logic": "预言机龙头，放量突破后回踩，首批重仓"
+    },
+    "NEARUSDT": {
+      "name": "NEAR",
+      "tranches": [
+        {"price": 2.22, "pct": 0.5},
+        {"price": 2.15, "pct": 0.3},
+        {"price": 2.08, "pct": 0.2}
+      ],
+      "stop": 2.02,
+      "tp1": 2.55,
+      "tp2": 2.75,
+      "logic": "L1公链动量最强，首批重仓防踏空"
+    },
+    "TIAUSDT": {
+      "name": "TIA（Celestia）",
+      "tranches": [
+        {"price": 0.42, "pct": 0.5},
+        {"price": 0.4, "pct": 0.3},
+        {"price": 0.385, "pct": 0.2}
+      ],
+      "stop": 0.372,
+      "tp1": 0.48,
+      "tp2": 0.52,
+      "logic": "模块化区块链，波动大，买点拉开间距"
+    },
+    "SOLUSDT": {
+      "name": "SOL",
+      "tranches": [
+        {"price": 102.0, "pct": 0.5},
+        {"price": 99.5, "pct": 0.3},
+        {"price": 97.0, "pct": 0.2}
+      ],
+      "stop": 94.5,
+      "tp1": 112.0,
+      "tp2": 117.0,
+      "logic": "主流L1，稳健底仓，浅回踩分批"
+    }
+  }
+}

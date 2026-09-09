@@ -3,8 +3,8 @@ $ErrorActionPreference = "Stop"
 $repo = "D:\Android\Project\20260813\demo"
 Set-Location $repo
 
-# Only sync project skills, related Python scripts/reports, and this sync task script.
-git add -- .trae/skills "scripts/*.py" "scripts/*.md" "scripts/crypto_reports" "scripts/stock_reports" sync_skills_to_github.ps1
+# Only sync project skills, related Python scripts/plans/reports, and this sync task script.
+git add -- .trae/skills "scripts/*.py" "scripts/*.md" "scripts/crypto_plans" "scripts/stock_plans" "scripts/crypto_reports" "scripts/stock_reports" sync_skills_to_github.ps1
 
 if (-not (git diff --cached --quiet)) {
     $stamp = Get-Date -Format "yyyy-MM-dd HH:mm"

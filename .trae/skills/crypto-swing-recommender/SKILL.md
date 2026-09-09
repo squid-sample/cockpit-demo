@@ -114,8 +114,8 @@ description: "Screens Binance USDT spot crypto for half-month (15d) and one-mont
 ## 持续记录、分层报告与复盘优化
 
 - 跟踪脚本持续保存状态和成交明细，不覆盖历史成交；每条成交必须包含时间、币种、动作、价格、数量、金额、触发原因和计划版本。
-- 最上层按计划期管理：半个月计划以自然月上、下半月编号，如 `2026年01期` 为 1 月 1 日至 15 日、`2026年02期` 为 1 月 16 日至月底；计划目录下再保存 `daily/`、`weekly/`、`monthly/` 报告。
-- 报告路径为 `scripts/crypto_reports/2026年01期/daily/YYYY-MM-DD.md`、`weekly/YYYY-Www.md`、`monthly/YYYY-MM.md`；主报告只展示当前状态，归档报告追加对应周期的成交统计。
+- 最上层按推荐计划期管理：一套完整的新推荐计划就是一期，如 `2026年第01期`、`2026年第02期`；每期独立保存制定日期、有效期、标的、买卖点、仓位和结果，不按自然月覆盖。每个计划目录下再保存 `daily/`、`weekly/`、`monthly/` 报告。
+- 报告路径为 `scripts/crypto_reports/2026年第01期/daily/YYYY-MM-DD.md`、`weekly/YYYY-Www.md`、`monthly/YYYY-MM.md`；主报告只展示当前状态，归档报告追加对应周期的成交统计。
 - 复盘至少统计完成卖出笔数、胜率、止盈/止损分布、已实现盈亏、平均盈利、平均亏损、盈亏比，并按币种、15 天/30 天周期和信号类型拆分。
 - 单一周期完成卖出少于 20 笔时只记录，不因单笔结果修改筛选阈值、仓位比例、止损距离或计划有效期。
 - 达到样本量后，使用滚动时间窗口验证规则变化，至少同时比较胜率、盈亏比、期望值、最大回撤和收益稳定性；只有在样本外表现没有恶化时才采用新版本。
@@ -128,15 +128,17 @@ description: "Screens Binance USDT spot crypto for half-month (15d) and one-mont
 - 明确提示加密货币高波动风险，不承诺收益
 - 用户若要跟踪，可配合仓库脚本 `scripts/crypto_tracker.py`（7×24 轮询、USDT 记账、分层报告）
 
-## 跟踪与微信推送落地（桌面脚本，已实施）
+## 跟踪与微信推送落地（仓库脚本，已实施）
 
-推荐后若用户要跟踪，直接改桌面脚本并重启任务，不要另写新脚本。
+推荐后若用户要跟踪，按 `scripts/strategy.md` 创建或更新计划目录中的 `plan.md`、`plan.json`，再重启通用脚本，不要复制新脚本。
 
 ### 文件位置（仓库）
 
 - 监控脚本：`scripts/crypto_tracker.py`（纯标准库，无第三方依赖）
-- 状态：`scripts/crypto_simulation_state.json`；主报告：`scripts/crypto_simulation_report.md`
-- 分层报告：`scripts/crypto_reports/daily/`、`weekly/`、`monthly/`
+- 全局策略：`scripts/strategy.md`
+- 当前计划指针：`scripts/crypto_plans/active_plan.txt`
+- 每期计划：`scripts/crypto_plans/<计划期>/plan.md`、`plan.json`、`state.json`、`report.md`
+- 分层报告：`scripts/crypto_reports/<计划期>/daily/`、`weekly/`、`monthly/`
 - A 股平行脚本：`scripts/a_stock_realtime.py`（交易时段轮询，逻辑同构）
 
 ### 运行与持久化（重要）
@@ -163,8 +165,8 @@ description: "Screens Binance USDT spot crypto for half-month (15d) and one-mont
 
 ### 更新推荐计划的步骤
 
-1. 实时拉数据重新制定 PLANS（币种、tranches 三批买点与仓位、stop/tp1/tp2）
-2. 改 `crypto_tracker.py` 顶部 `PLANS` 字典；同时更新报告标题里的制定日期
-3. 若要重新模拟，删 `crypto_simulation_state.json`（否则沿用旧持仓）
+1. 实时拉数据，按 `scripts/strategy.md` 重新制定币种、tranches 三批买点与仓位、stop/tp1/tp2
+2. 新建 `scripts/crypto_plans/<新计划期>/plan.md` 和 `plan.json`，并将 `scripts/crypto_plans/active_plan.txt` 切换到新计划期
+3. 若要重新模拟，新计划目录使用新的 `state.json`；旧计划目录保留，不删除
 4. `schtasks /end /tn CryptoTracker` → `/run /tn CryptoTracker` 重启
 5. 手动跑一次 `run_once()` 验证报告生成正常

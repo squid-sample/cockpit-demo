@@ -10,58 +10,24 @@ import urllib.parse
 import urllib.request
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-STATE_FILE = os.path.join(BASE_DIR, "crypto_simulation_state.json")
-REPORT_FILE = os.path.join(BASE_DIR, "crypto_simulation_report.md")
+PLAN_ROOT = os.path.join(BASE_DIR, "crypto_plans")
+with open(os.path.join(PLAN_ROOT, "active_plan.txt"), "r", encoding="utf-8") as f:
+    ACTIVE_PLAN_ID = f.read().strip()
+PLAN_DIR = os.path.join(PLAN_ROOT, ACTIVE_PLAN_ID)
+with open(os.path.join(PLAN_DIR, "plan.json"), "r", encoding="utf-8") as f:
+    PLAN_CONFIG = json.load(f)
+STATE_FILE = os.path.join(PLAN_DIR, "state.json")
+REPORT_FILE = os.path.join(PLAN_DIR, "report.md")
 REPORT_ARCHIVE_DIR = os.path.join(BASE_DIR, "crypto_reports")
 POLL_SECONDS = 120
-SIM_CAPITAL = 100000.0  # 模拟资金 10 万 USDT
+SIM_CAPITAL = float(PLAN_CONFIG["capital"])
 PUSHPLUS_TOKEN = "e39674189a874c48888292f80e0c3464"
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
 BINANCE = "https://data-api.binance.vision"
-
-# 推荐计划（2026-09-07 数据制定，半个月维度，分批建仓）
-# tranches：三批买点，价格跌到对应点位买入对应仓位（占该币预算比例）
-# 短周期前重后轻：第一批 50% 保证浅回调也能吃到主升浪，后两批是加仓福利
-PLAN_VALID_DAYS = 10  # 计划有效期：10 天未触发任何一批建仓则到期提醒并暂停
-PLAN_ID = "2026年第01期"  # 每次重新制定推荐计划时递增，例如 2026年第02期
-PLAN_DATE = "2026-09-07"
-PLANS = {
-    "LINKUSDT": {"name": "LINK（Chainlink）",
-                 "tranches": [{"price": 12.70, "pct": 0.50},
-                              {"price": 12.40, "pct": 0.30},
-                              {"price": 12.10, "pct": 0.20}],
-                 "stop": 11.70, "tp1": 14.20, "tp2": 15.00,
-                 "logic": "预言机龙头，放量突破后回踩，首批重仓"},
-    "NEARUSDT": {"name": "NEAR",
-                 "tranches": [{"price": 2.22, "pct": 0.50},
-                              {"price": 2.15, "pct": 0.30},
-                              {"price": 2.08, "pct": 0.20}],
-                 "stop": 2.02, "tp1": 2.55, "tp2": 2.75,
-                 "logic": "L1公链动量最强，首批重仓防踏空"},
-    "TIAUSDT": {"name": "TIA（Celestia）",
-                "tranches": [{"price": 0.420, "pct": 0.50},
-                             {"price": 0.400, "pct": 0.30},
-                             {"price": 0.385, "pct": 0.20}],
-                "stop": 0.372, "tp1": 0.480, "tp2": 0.520,
-                "logic": "模块化区块链，波动大，买点拉开间距"},
-    "SOLUSDT": {"name": "SOL",
-                "tranches": [{"price": 102.0, "pct": 0.50},
-                             {"price": 99.5, "pct": 0.30},
-                             {"price": 97.0, "pct": 0.20}],
-                "stop": 94.5, "tp1": 112.0, "tp2": 117.0,
-                "logic": "主流L1，稳健底仓，浅回踩分批"},
-}
-
-
-def half_month_cycle(date_text):
-    day = dt.date.fromisoformat(date_text) if date_text else dt.date.today()
-    issue = (day.month - 1) * 2 + (1 if day.day <= 15 else 2)
-    start = day.replace(day=1 if day.day <= 15 else 16)
-    if day.day <= 15:
-        end = day.replace(day=15)
-    else:
-        end = (day.replace(day=28) + dt.timedelta(days=4)).replace(day=1) - dt.timedelta(days=1)
-    return "{}年{:02d}期".format(day.year, issue), start, end
+PLAN_VALID_DAYS = int(PLAN_CONFIG["valid_days"])
+PLAN_ID = PLAN_CONFIG["plan_id"]
+PLAN_DATE = PLAN_CONFIG["plan_date"]
+PLANS = PLAN_CONFIG["plans"]
 
 
 def plan_buy_low(plan):
