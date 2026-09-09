@@ -85,6 +85,7 @@ class CryptoTracker:
                 state.setdefault("positions", {})
                 state.setdefault("trades", [])
                 state.setdefault("last_quotes", {})
+                state.setdefault("summary_pushes", {})
                 state.setdefault("plan_id", PLAN_ID)
                 state.setdefault("plan_date", PLAN_DATE)
                 return state
@@ -99,6 +100,7 @@ class CryptoTracker:
             "plan_expired": {},
             "trades": [],
             "last_quotes": {},
+            "summary_pushes": {},
         }
 
     def save_state(self):
@@ -221,6 +223,7 @@ class CryptoTracker:
 
         self.save_state()
         self.write_report(quotes)
+        self.push_scheduled_summary(quotes)
         if events:
             content = self.build_push_html(events, quotes)
             push_async(self.build_push_title(events, quotes), content)
@@ -290,6 +293,39 @@ class CryptoTracker:
         "stop": ("触发止损（清仓）", "#dc2626"),
         "expire": ("计划到期未建仓", "#6b7280"),
     }
+
+    def push_scheduled_summary(self, quotes):
+        now = dt.datetime.now()
+        slots = ((dt.time(9, 0), "morning", "早间"), (dt.time(17, 50), "evening", "晚间"))
+        today = now.date().isoformat()
+        for target, key, label in slots:
+            marker = "{}-{}".format(today, key)
+            if now.time() < target or self.state["summary_pushes"].get(marker):
+                continue
+            parts = [
+                "<div style='font-family:Microsoft YaHei,Arial;font-size:14px;line-height:1.7'>",
+                "<h3>{}加密货币持仓汇总 · {}</h3>".format(label, now.strftime("%Y-%m-%d %H:%M")),
+                "<p>计划期：{}；现金：{:.2f} USDT；总资产：{:.2f} USDT；浮动盈亏：<b>{:+.2f} USDT</b></p>".format(
+                    self.state.get("plan_id", PLAN_ID), self.state["cash"], self.total_asset(quotes),
+                    self.total_asset(quotes) - SIM_CAPITAL),
+            ]
+            if self.state["positions"]:
+                parts.append("<p><b>当前持仓</b></p><ul>")
+                for symbol, pos in self.state["positions"].items():
+                    avg = pos["cost"] / pos["amount"] if pos["amount"] else 0
+                    price = quotes.get(symbol, {}).get("price", avg)
+                    pnl = pos["amount"] * price - pos["cost"]
+                    plan = PLANS[symbol]
+                    parts.append("<li>{}：{:.2f} 枚，均价 {:.4f}，现价 {:.4f}，浮盈 <b>{:+.2f} USDT</b>；后续：止损 {}，止盈1 {}，止盈2 {}</li>".format(
+                        plan["name"], pos["amount"], avg, price, pnl, plan["stop"], plan["tp1"], plan["tp2"]))
+                parts.append("</ul>")
+            else:
+                parts.append("<p>当前无持仓。</p>")
+            parts.append("<p><b>后续计划</b>：按本期 plan.json 的分批买点执行；未持仓标的等待回踩买点，持仓标的按止损/止盈规则处理。</p>")
+            parts.append("<p style='color:#aaa;font-size:12px'>仅为程序模拟，不会真实下单。</p></div>")
+            push_async("币·{}持仓汇总".format(label), "".join(parts))
+            self.state["summary_pushes"][marker] = now.strftime("%Y-%m-%d %H:%M")
+        self.save_state()
 
     def build_push_html(self, events, quotes):
         total = self.total_asset(quotes)

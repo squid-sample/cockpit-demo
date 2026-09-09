@@ -153,6 +153,7 @@ description: "Screens Binance USDT spot crypto for half-month (15d) and one-mont
 - 微信 PushPlus：`POST https://www.pushplus.plus/send`，`template=html`，token 存在脚本常量 `PUSHPLUS_TOKEN`
 - 纯标准库 `urllib.request` 发送，后台线程，失败静默不影响主循环
 - 邮件通道（163 SMTP SSL 465）已在脚本中实现但当前停用；恢复时在 `push_async`/`worker` 里加回 `push_email` 调用即可
+- 定时汇总：每天 09:00 和 17:50 各推送一次当前计划的持仓、浮盈、现金、总资产和后续计划；同一时段当天只推送一次，记录在当前计划 `state.json` 的 `summary_pushes` 字段
 - 测试推送：构造 events 调 `build_push_html()` + `push_wechat()` 验证，发完即删临时脚本
 
 ### 推送标题命名规范（一眼看懂是什么信号）

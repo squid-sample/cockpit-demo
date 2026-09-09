@@ -136,7 +136,9 @@ class SimulationTracker:
         if active and market_open:
             threading.Thread(target=self.load_and_process, daemon=True).start()
         elif self.state["start_date"]:
-            self.write_report({})
+            quotes = self.state.get("last_quotes", {})
+            self.write_report(quotes)
+            self.push_scheduled_summary(quotes)
         self.root.after(SIM_POLL_MS, self.poll)
 
     def load_and_process(self):
@@ -209,6 +211,45 @@ class SimulationTracker:
         if alerts:
             self.show_trade_popup(alerts)
             self.push_trade_alerts(alerts)
+
+    def push_scheduled_summary(self, quotes):
+        now = dt.datetime.now()
+        target = dt.time(15, 0)
+        marker = "{}-close".format(now.date().isoformat())
+        if now.time() < target or self.state["summary_pushes"].get(marker):
+            return
+        total = self.calculate_asset(quotes)
+        pnl_total = 0.0
+        parts = [
+            "<div style='font-family:Microsoft YaHei,Arial;font-size:14px;line-height:1.7'>",
+            "<h3>A股收盘持仓汇总 · {}</h3>".format(now.strftime("%Y-%m-%d %H:%M")),
+            "<p>计划期：{}；现金：{:.2f} 元；总资产：{:.2f} 元；浮动盈亏：<b>{:+.2f} 元</b></p>".format(
+                self.state.get("plan_id", PLAN_ID), self.state["cash"], total, total - SIM_CAPITAL),
+        ]
+        if self.state["positions"]:
+            parts.append("<p><b>当前持仓</b></p><ul>")
+            for code, position in self.state["positions"].items():
+                plan = SIM_PLANS[code]
+                price = quotes.get(code, {}).get("current", position["buy_price"])
+                value = position["shares"] * price
+                pnl = value - position["shares"] * position["buy_price"]
+                pnl_total += pnl
+                parts.append("<li>{}：{} 股，买入价 {:.2f}，现价 {:.2f}，浮盈 <b>{:+.2f} 元</b>；后续：止损 {}，止盈1 {}，止盈2 {}</li>".format(
+                    plan["name"], position["shares"], position["buy_price"], price, pnl,
+                    plan["stop"], plan["tp1"], plan["tp2"]))
+            parts.append("</ul>")
+        else:
+            parts.append("<p>当前无持仓。</p>")
+        parts.append("<p><b>后续计划</b>：未持仓股票等待进入买入区间；已有持仓按止损、止盈1卖半、止盈2清仓规则执行。</p>")
+        parts.append("<p style='color:#aaa;font-size:12px'>仅为程序模拟，不会真实下单。</p></div>")
+        def worker():
+            try:
+                push_wechat("股·收盘持仓汇总", "".join(parts))
+            except Exception:
+                pass
+        threading.Thread(target=worker, daemon=True).start()
+        self.state["summary_pushes"][marker] = now.strftime("%Y-%m-%d %H:%M")
+        self.save_state()
 
     def push_trade_alerts(self, alerts):
         # 微信推送成交提醒（HTML，附推荐计划），放后台线程避免卡界面
