@@ -114,7 +114,8 @@ description: "Screens Binance USDT spot crypto for half-month (15d) and one-mont
 ## 持续记录、分层报告与复盘优化
 
 - 跟踪脚本持续保存状态和成交明细，不覆盖历史成交；每条成交必须包含时间、币种、动作、价格、数量、金额、触发原因和计划版本。
-- 报告分三层保存：`scripts/crypto_reports/daily/YYYY-MM-DD.md`、`scripts/crypto_reports/weekly/YYYY-Www.md`、`scripts/crypto_reports/monthly/YYYY-MM.md`；主报告只展示当前状态，归档报告追加对应周期的成交统计。
+- 最上层按计划期管理：半个月计划以自然月上、下半月编号，如 `2026年01期` 为 1 月 1 日至 15 日、`2026年02期` 为 1 月 16 日至月底；计划目录下再保存 `daily/`、`weekly/`、`monthly/` 报告。
+- 报告路径为 `scripts/crypto_reports/2026年01期/daily/YYYY-MM-DD.md`、`weekly/YYYY-Www.md`、`monthly/YYYY-MM.md`；主报告只展示当前状态，归档报告追加对应周期的成交统计。
 - 复盘至少统计完成卖出笔数、胜率、止盈/止损分布、已实现盈亏、平均盈利、平均亏损、盈亏比，并按币种、15 天/30 天周期和信号类型拆分。
 - 单一周期完成卖出少于 20 笔时只记录，不因单笔结果修改筛选阈值、仓位比例、止损距离或计划有效期。
 - 达到样本量后，使用滚动时间窗口验证规则变化，至少同时比较胜率、盈亏比、期望值、最大回撤和收益稳定性；只有在样本外表现没有恶化时才采用新版本。
@@ -131,11 +132,12 @@ description: "Screens Binance USDT spot crypto for half-month (15d) and one-mont
 
 推荐后若用户要跟踪，直接改桌面脚本并重启任务，不要另写新脚本。
 
-### 文件位置（用户桌面）
+### 文件位置（仓库）
 
-- 监控脚本：`C:\Users\admin\Desktop\crypto_tracker.py`（纯标准库，无第三方依赖）
-- 状态：`crypto_simulation_state.json`；报告：`crypto_simulation_report.md`
-- A 股平行脚本：`C:\Users\admin\Desktop\a_stock_realtime.py`（交易时段轮询，逻辑同构）
+- 监控脚本：`scripts/crypto_tracker.py`（纯标准库，无第三方依赖）
+- 状态：`scripts/crypto_simulation_state.json`；主报告：`scripts/crypto_simulation_report.md`
+- 分层报告：`scripts/crypto_reports/daily/`、`weekly/`、`monthly/`
+- A 股平行脚本：`scripts/a_stock_realtime.py`（交易时段轮询，逻辑同构）
 
 ### 运行与持久化（重要）
 

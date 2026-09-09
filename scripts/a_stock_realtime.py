@@ -16,8 +16,17 @@ SIM_REPORT_FILE = os.path.join(os.path.dirname(__file__), "stock_simulation_repo
 SIM_REPORT_ARCHIVE_DIR = os.path.join(os.path.dirname(__file__), "stock_reports")
 SIM_CAPITAL = 100000.0
 SIM_DAYS = 30
+PLAN_ID = "2026年第01期"  # 每次重新制定推荐计划时递增，例如 2026年第02期
+PLAN_DATE = "2026-09-07"
 PUSHPLUS_TOKEN = "e39674189a874c48888292f80e0c3464"
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
+def month_cycle(date_text):
+    day = dt.date.fromisoformat(date_text) if date_text else dt.date.today()
+    start = day.replace(day=1)
+    end = (day.replace(day=28) + dt.timedelta(days=4)).replace(day=1) - dt.timedelta(days=1)
+    return "{}年第{:02d}期".format(day.year, day.month), start, end
+
+
 SIM_PLANS = {
     "sh601138": {"name": "工业富联", "buy_low": 62.8, "buy_high": 64.0, "stop": 61.5, "tp1": 68.0, "tp2": 70.0},
     "sh601899": {"name": "紫金矿业", "buy_low": 32.4, "buy_high": 33.0, "stop": 31.6, "tp1": 35.0, "tp2": 35.8},
@@ -95,11 +104,16 @@ class SimulationTracker:
         if os.path.exists(SIM_STATE_FILE):
             try:
                 with open(SIM_STATE_FILE, "r", encoding="utf-8") as file:
-                    return json.load(file)
+                    state = json.load(file)
+                    state.setdefault("plan_id", PLAN_ID)
+                    state.setdefault("plan_date", PLAN_DATE)
+                    return state
             except (OSError, ValueError):
                 pass
         return {
             "start_date": None,
+            "plan_id": PLAN_ID,
+            "plan_date": PLAN_DATE,
             "end_date": None,
             "cash": SIM_CAPITAL,
             "positions": {},
@@ -184,7 +198,7 @@ class SimulationTracker:
                     }
                     action = "买入 {} {} 股，成交价 {:.2f} 元".format(plan["name"], shares, price)
                     self.record(action, code=code, action="buy", price=price, shares=shares,
-                                value=cost, plan_version=self.state.get("start_date"))
+                                value=cost, plan_version=self.state.get("plan_id", PLAN_ID))
                     day_log["actions"].append(action)
                     alerts.append({"code": code, "kind": "buy", "price": price, "text": action})
         day_log["quotes"] = quotes
@@ -295,7 +309,7 @@ class SimulationTracker:
             SIM_PLANS[code]["name"], shares, price, reason, pnl)
         self.record(action, code=code, action="sell", price=price, shares=shares,
                     value=proceeds, pnl=pnl, reason=reason,
-                    plan_version=self.state.get("start_date"))
+                    plan_version=self.state.get("plan_id", PLAN_ID))
         if position["shares"] == 0:
             del self.state["positions"][code]
         return action
@@ -342,6 +356,8 @@ class SimulationTracker:
             quotes = self.state.get("last_quotes", {})
         start = self.state["start_date"] or "等待 9:30 启动"
         end = self.state["end_date"] or "未开始"
+        plan_id = self.state.get("plan_id", PLAN_ID)
+        plan_date = self.state.get("plan_date", PLAN_DATE)
         market_value = self.state["cash"]
         cost_total = 0.0
         pnl_total = 0.0
@@ -412,7 +428,9 @@ class SimulationTracker:
         lines = [
             "# A 股月内模拟交易报告", "",
             "> 仅为程序模拟，不会真实下单；行情来自公开接口，价格和结果仅供研究。", "",
-            "- 模拟周期：{} 至 {}".format(start, end),
+            "- 计划期：{}".format(plan_id),
+            "- 计划制定日期：{}".format(plan_date),
+            "- 模拟有效期：{} 至 {}".format(start, end),
             "- 初始资金：{:.2f} 元".format(SIM_CAPITAL),
             "- 当前资产：{:.2f} 元".format(market_value),
             "- 浮动盈亏：{:+.2f} 元（{:+.2f}%）".format(profit, profit / SIM_CAPITAL * 100), "",
@@ -460,7 +478,7 @@ class SimulationTracker:
              (now.date().replace(day=28) + dt.timedelta(days=4)).replace(day=1) - dt.timedelta(days=1)),
         )
         for period, filename, start, end in periods:
-            directory = os.path.join(SIM_REPORT_ARCHIVE_DIR, period)
+            directory = os.path.join(SIM_REPORT_ARCHIVE_DIR, self.state.get("plan_id") or PLAN_ID, period)
             os.makedirs(directory, exist_ok=True)
             archived = list(lines) + [""] + self.period_summary(start.isoformat(), end.isoformat()) + [""]
             archived += ["## 优化纪律", "",

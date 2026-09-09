@@ -23,6 +23,8 @@ BINANCE = "https://data-api.binance.vision"
 # tranches：三批买点，价格跌到对应点位买入对应仓位（占该币预算比例）
 # 短周期前重后轻：第一批 50% 保证浅回调也能吃到主升浪，后两批是加仓福利
 PLAN_VALID_DAYS = 10  # 计划有效期：10 天未触发任何一批建仓则到期提醒并暂停
+PLAN_ID = "2026年第01期"  # 每次重新制定推荐计划时递增，例如 2026年第02期
+PLAN_DATE = "2026-09-07"
 PLANS = {
     "LINKUSDT": {"name": "LINK（Chainlink）",
                  "tranches": [{"price": 12.70, "pct": 0.50},
@@ -49,6 +51,17 @@ PLANS = {
                 "stop": 94.5, "tp1": 112.0, "tp2": 117.0,
                 "logic": "主流L1，稳健底仓，浅回踩分批"},
 }
+
+
+def half_month_cycle(date_text):
+    day = dt.date.fromisoformat(date_text) if date_text else dt.date.today()
+    issue = (day.month - 1) * 2 + (1 if day.day <= 15 else 2)
+    start = day.replace(day=1 if day.day <= 15 else 16)
+    if day.day <= 15:
+        end = day.replace(day=15)
+    else:
+        end = (day.replace(day=28) + dt.timedelta(days=4)).replace(day=1) - dt.timedelta(days=1)
+    return "{}年{:02d}期".format(day.year, issue), start, end
 
 
 def plan_buy_low(plan):
@@ -106,11 +119,15 @@ class CryptoTracker:
                 state.setdefault("positions", {})
                 state.setdefault("trades", [])
                 state.setdefault("last_quotes", {})
+                state.setdefault("plan_id", PLAN_ID)
+                state.setdefault("plan_date", PLAN_DATE)
                 return state
             except (OSError, ValueError):
                 pass
         return {
             "start_date": dt.date.today().isoformat(),
+            "plan_id": PLAN_ID,
+            "plan_date": PLAN_DATE,
             "cash": SIM_CAPITAL,
             "positions": {},
             "plan_expired": {},
@@ -297,7 +314,7 @@ class CryptoTracker:
             coin, idx=index + 1, pct=tranche["pct"] * 100, amount=amount, price=price,
             spend=spend, done=done, total=total, avg=pos["cost"] / pos["amount"])
         self.record_trade(symbol, msg, action="buy", price=price, amount=amount, value=spend,
-                          tranche=index + 1, plan_version=self.state.get("start_date"))
+                          tranche=index + 1, plan_version=self.state.get("plan_id", PLAN_ID))
         return msg
 
     KIND_STYLE = {
@@ -366,7 +383,7 @@ class CryptoTracker:
             reason, PLANS[symbol]["name"], amount, price, pnl)
         self.record_trade(symbol, msg, action="sell", price=price, amount=amount,
                           value=proceeds, pnl=pnl, reason=reason,
-                          plan_version=self.state.get("start_date"))
+                          plan_version=self.state.get("plan_id", PLAN_ID))
         if pos["amount"] < 1e-8:
             del self.state["positions"][symbol]
         return "【模拟成交】" + msg
@@ -388,7 +405,9 @@ class CryptoTracker:
             "",
             "> 仅为程序模拟，不会真实下单；行情来自币安公开接口，7x24 小时轮询，仅供研究。",
             "",
-            "- 开始日期：{}（计划有效期 {} 天，到期未建仓自动暂停）".format(
+            "- 计划期：{}".format(self.state.get("plan_id", PLAN_ID)),
+            "- 计划制定日期：{}".format(self.state.get("plan_date", PLAN_DATE)),
+            "- 开始跟踪日期：{}（计划有效期 {} 天，到期未建仓自动暂停）".format(
                 self.state["start_date"], PLAN_VALID_DAYS),
             "- 模拟资金：{:.0f} USDT（每币分配约 {:.0f}）".format(SIM_CAPITAL, SIM_CAPITAL / len(PLANS)),
             "- 当前总资产：{:.2f} USDT".format(self.total_asset(quotes)),
@@ -396,7 +415,8 @@ class CryptoTracker:
                 self.total_asset(quotes) - SIM_CAPITAL,
                 (self.total_asset(quotes) - SIM_CAPITAL) / SIM_CAPITAL * 100),
             "",
-            "## 推荐计划（2026-09-07 制定，分批建仓 50%/30%/20%）",
+            "## 推荐计划（{}，{} 制定，分批建仓 50%/30%/20%）".format(
+                self.state.get("plan_id", PLAN_ID), self.state.get("plan_date", PLAN_DATE)),
             "",
             "| 币种 | 第一批50% | 第二批30% | 第三批20% | 止损 | 止盈1 | 止盈2 | 逻辑 |",
             "|---|---:|---:|---:|---:|---:|---:|---|",
@@ -469,7 +489,7 @@ class CryptoTracker:
              (now.date().replace(day=28) + dt.timedelta(days=4)).replace(day=1) - dt.timedelta(days=1)),
         )
         for period, filename, start, end in periods:
-            directory = os.path.join(REPORT_ARCHIVE_DIR, period)
+            directory = os.path.join(REPORT_ARCHIVE_DIR, self.state.get("plan_id") or PLAN_ID, period)
             os.makedirs(directory, exist_ok=True)
             archived = list(lines) + [""] + self.period_summary(start.isoformat(), end.isoformat()) + [""]
             archived += ["## 优化纪律", "",
