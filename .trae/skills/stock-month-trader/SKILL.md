@@ -1,55 +1,57 @@
 ---
 name: "stock-month-trader"
-description: "Screens A-share stocks for 1-month trading setups with entry, stop-loss, and staggered take-profit levels. Invoke when the user asks for short-term stock recommendations or trade plans."
+description: "筛选适合一个月内交易的 A 股，给出买入区间、止损价和分批止盈价。用户要求短线股票推荐或交易计划时调用。"
 ---
+# A 股月内交易计划
 
-# Stock Month Trader
+当用户需要明确买卖价位的短线 A 股建议时，使用此 skill。
 
-Use this skill when the user wants short-term A-share stock ideas with explicit buy/sell levels.
+## 目标
 
-## Goal
+为预计一个月左右可能出现交易机会的股票，制定简洁、明确的交易计划。
 
-Provide a concise trading plan for stocks expected to have actionable movement within about one month.
+## 输出内容
 
-## What to output
+每只候选股票必须包含：
 
-For each candidate stock, include:
-- Stock name and code
-- Why it is on the list
-- Suggested buy zone
-- First take-profit zone
-- Second take-profit zone
-- Stop-loss level
-- Whether the stock is suitable for users who cannot trade创业板/科创板
+- 股票名称和代码
+- 入选理由
+- 建议买入区间
+- 第一止盈区间
+- 第二止盈区间
+- 止损价
+- 是否适合无法交易创业板/科创板的用户
 
-## Selection rules
+## 选股规则
 
-Prefer:
-- Main-board A-shares first
-- Strong sector leaders
-- Stocks with clear trend, volume support, and recent catalyst
-- Stocks that match the user's account permissions
+优先选择：
 
-Avoid:
-- Illiquid small caps
-- Pure rumor-driven pumps
-- Stocks requiring permissions the user does not have
-- Promising guaranteed returns
+- 优先主板 A 股
+- 强势行业中的龙头公司
+- 趋势清晰、有成交量支持且近期有催化因素的股票
+- 符合用户账户交易权限的股票
 
-## Response style
+避免选择：
 
-- Be direct and practical
-- Use simple price ranges
-- If the market is weak, say to wait instead of forcing a pick
-- Do not claim the strategy can guarantee 8–10 points
-- Frame 8–10 points only as a target range when conditions are favorable
+- 流动性差的小盘股
+- 纯粹依靠传闻推动的股票
+- 用户没有交易权限的股票
+- 宣称能够保证收益的股票或方案
 
-## Suggested format
+## 输出风格
 
-1. Overall view
-2. Candidate list
-3. Buy zone / sell zone / stop-loss table
-4. Short conclusion
+- 直接、实用
+- 使用容易理解的价格区间
+- 如果市场较弱，应建议等待，不能为了给出推荐而强行选股
+- 不得宣称策略能够保证上涨 8%—10%
+- 只有在条件较好时，才将 8%—10% 作为目标区间说明
+
+## 建议输出格式
+
+1. 市场总体观点
+2. 候选股票列表
+3. 买入区间 / 卖出区间 / 止损价表格
+4. 简短结论
 
 ## 持续记录、分层报告与复盘优化
 
@@ -58,12 +60,14 @@ Avoid:
 - 当前计划指针：`scripts/stock_plans/active_plan.txt`
 - 每期计划：`scripts/stock_plans/<计划期>/plan.md`、`plan.json`、`state.json`、`report.md`
 - 报告按计划期和时间周期分层保存：`scripts/stock_reports/<计划期>/daily/`、`weekly/`、`monthly/`，例如 `scripts/stock_reports/2026年第01期/daily/YYYY-MM-DD.md`。
-- 周期复盘至少统计完成卖出笔数、胜率、止盈/止损分布、已实现盈亏、平均盈利、平均亏损和盈亏比，并按股票、计划版本和信号类型拆分。
-- 完成卖出少于 20 笔时只记录结果，不根据单笔交易修改买入区间、止损距离、止盈比例或持仓分配。
-- 达到样本量后使用滚动时间窗口和样本外数据验证候选调整，同时检查胜率、盈亏比、期望值、最大回撤和收益稳定性；样本外表现恶化则不采用。
-- 每次采用新规则递增计划版本，在 `scripts/stock_plans/<计划期>/` 保存新的 `plan.md`、`plan.json` 和 `state.json`，并保留旧版本记录，避免只按胜率或单个强势股票调参造成过拟合。
+- 周期复盘至少统计完成卖出笔数、胜率、止盈/止损分布、已实现盈亏、平均盈利、平均亏损、盈亏比、期望值、最大回撤和收益稳定性，并按股票、计划版本和信号类型拆分。
+- 制定新计划前必须先复盘历史计划和实际操作；历史计划少于 10 期时使用全部可用历史数据，达到 10 期后默认使用最近 10 期，并动态更新复盘窗口。
+- 根据复盘结果动态评估选股条件、买入区间、仓位、止损和止盈参数，只有胜率、期望值和回撤等指标支持时才优化新计划。
+- 历史样本不足或完成卖出少于 20 笔时只记录结果，不根据单笔交易激进修改买入区间、止损距离、止盈比例或持仓分配。
+- 达到样本量后使用滚动时间窗口和样本外数据验证候选调整；样本外表现恶化则不采用。
+- 每次采用新规则递增计划版本，在 `scripts/stock_plans/<计划期>/` 保存新的 `plan.md`、`plan.json` 和 `state.json`，并保留旧版本记录，避免只按胜率、单一期数或单个强势股票调参造成过拟合。
 - 定时汇总：每天 15:00 推送一次当前计划的收盘持仓、浮盈、现金、总资产和后续计划；同一自然日只推送一次，记录在当前计划 `state.json` 的 `summary_pushes` 字段。
 
-## Safety note
+## 风险提示
 
-Always remind the user that stock trading involves risk and that levels are only reference levels, not certainty.
+必须提醒用户：股票交易存在风险，文中的价格只作为参考，不代表确定的买卖结果。
