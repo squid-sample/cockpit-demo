@@ -2,7 +2,6 @@
 name: "crypto-swing-recommender"
 description: "Screens Binance USDT spot crypto for half-month (15d) and one-month (30d) swing setups, recommending coins with >10% momentum plus concrete buy zone / stop-loss / take-profit levels. Invoke when user asks for short-term crypto coin recommendations, crypto swing trade plans, or which coins have upcoming market moves."
 ---
-
 # 加密货币短线推荐（半个月 / 一个月）
 
 ## 如何使用（给用户）
@@ -117,9 +116,11 @@ description: "Screens Binance USDT spot crypto for half-month (15d) and one-mont
 - 最上层按推荐计划期管理：一套完整的新推荐计划就是一期，如 `2026年第01期`、`2026年第02期`；每期独立保存制定日期、有效期、标的、买卖点、仓位和结果，不按自然月覆盖。每个计划目录下再保存 `daily/`、`weekly/`、`monthly/` 报告。
 - 报告路径为 `scripts/crypto_reports/2026年第01期/daily/YYYY-MM-DD.md`、`weekly/YYYY-Www.md`、`monthly/YYYY-MM.md`；主报告只展示当前状态，归档报告追加对应周期的成交统计。
 - 复盘至少统计完成卖出笔数、胜率、止盈/止损分布、已实现盈亏、平均盈利、平均亏损、盈亏比，并按币种、15 天/30 天周期和信号类型拆分。
-- 单一周期完成卖出少于 20 笔时只记录，不因单笔结果修改筛选阈值、仓位比例、止损距离或计划有效期。
-- 达到样本量后，使用滚动时间窗口验证规则变化，至少同时比较胜率、盈亏比、期望值、最大回撤和收益稳定性；只有在样本外表现没有恶化时才采用新版本。
-- 每次规则调整递增计划版本并保留旧版本结果，禁止只挑选表现最好的币种或时间段优化，避免过拟合。
+- 制定新计划前必须先复盘历史计划和实际操作；历史计划少于 10 期时使用全部可用历史数据，达到 10 期后默认使用最近 10 期，并动态更新复盘窗口。
+- 根据复盘结果动态评估币种筛选、买入区间、仓位比例、止损距离、止盈目标和计划有效期，只有胜率、期望值、盈亏比、最大回撤和收益稳定性同时支持时才优化新计划。
+- 历史样本不足或单一周期完成卖出少于 20 笔时只记录，不因单笔结果激进修改筛选阈值、仓位比例、止损距离或计划有效期。
+- 达到样本量后，使用滚动时间窗口和样本外数据验证规则变化；只有在样本外表现没有恶化时才采用新版本。
+- 每次规则调整递增计划版本并保留旧版本结果，禁止只挑选表现最好的币种、单一期数或时间段优化，避免过拟合。
 
 ## 注意事项
 
