@@ -217,7 +217,7 @@ class SimulationTracker:
 
     def push_scheduled_summary(self, quotes):
         now = dt.datetime.now()
-        target = dt.time(15, 0)
+        target = dt.time(15, 5)
         marker = "{}-close".format(now.date().isoformat())
         if now.time() < target or self.state["summary_pushes"].get(marker):
             return
