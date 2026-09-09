@@ -104,6 +104,7 @@ class SimulationTracker:
                     state = json.load(file)
                     state.setdefault("plan_id", PLAN_ID)
                     state.setdefault("plan_date", PLAN_DATE)
+                    state.setdefault("summary_pushes", {})
                     return state
             except (OSError, ValueError):
                 pass
@@ -117,6 +118,7 @@ class SimulationTracker:
             "trades": [],
             "daily": [],
             "last_quotes": {},
+            "summary_pushes": {},
         }
 
     def save_state(self):
@@ -125,7 +127,7 @@ class SimulationTracker:
 
     def poll(self):
         now = dt.datetime.now()
-        market_open = now.weekday() < 5 and dt.time(9, 30) <= now.time() <= dt.time(15, 0)
+        market_open = now.weekday() < 5 and dt.time(9, 30) <= now.time() < dt.time(15, 0)
         if market_open and self.state["start_date"] is None:
             self.state["start_date"] = now.date().isoformat()
             self.state["end_date"] = (now.date() + dt.timedelta(days=SIM_DAYS)).isoformat()
@@ -208,6 +210,7 @@ class SimulationTracker:
             day_log["actions"].append("无交易")
         self.save_state()
         self.write_report(quotes)
+        self.push_scheduled_summary(quotes)
         if alerts:
             self.show_trade_popup(alerts)
             self.push_trade_alerts(alerts)
@@ -244,12 +247,15 @@ class SimulationTracker:
         parts.append("<p style='color:#aaa;font-size:12px'>仅为程序模拟，不会真实下单。</p></div>")
         def worker():
             try:
-                push_wechat("股·收盘持仓汇总", "".join(parts))
-            except Exception:
-                pass
+                result = push_wechat("股·收盘持仓汇总", "".join(parts))
+                if result.get("code") != 200:
+                    raise RuntimeError("PushPlus返回码 {}".format(result.get("code")))
+                self.state["summary_pushes"][marker] = now.strftime("%Y-%m-%d %H:%M")
+                self.save_state()
+            except Exception as exc:
+                self.record("收盘持仓汇总推送失败：{}".format(exc))
+                self.save_state()
         threading.Thread(target=worker, daemon=True).start()
-        self.state["summary_pushes"][marker] = now.strftime("%Y-%m-%d %H:%M")
-        self.save_state()
 
     def push_trade_alerts(self, alerts):
         # 微信推送成交提醒（HTML，附推荐计划），放后台线程避免卡界面
