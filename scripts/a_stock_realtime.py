@@ -13,6 +13,7 @@ SIM_POLL_MS = 60000
 TRANSPARENT_COLOR = "#ff00ff"
 SIM_STATE_FILE = os.path.join(os.path.dirname(__file__), "stock_simulation_state.json")
 SIM_REPORT_FILE = os.path.join(os.path.dirname(__file__), "stock_simulation_report.md")
+SIM_REPORT_ARCHIVE_DIR = os.path.join(os.path.dirname(__file__), "stock_reports")
 SIM_CAPITAL = 100000.0
 SIM_DAYS = 30
 PUSHPLUS_TOKEN = "e39674189a874c48888292f80e0c3464"
@@ -182,7 +183,8 @@ class SimulationTracker:
                         "tp1_done": False,
                     }
                     action = "买入 {} {} 股，成交价 {:.2f} 元".format(plan["name"], shares, price)
-                    self.record(action)
+                    self.record(action, code=code, action="buy", price=price, shares=shares,
+                                value=cost, plan_version=self.state.get("start_date"))
                     day_log["actions"].append(action)
                     alerts.append({"code": code, "kind": "buy", "price": price, "text": action})
         day_log["quotes"] = quotes
@@ -284,17 +286,55 @@ class SimulationTracker:
     def sell(self, code, price, shares, reason):
         position = self.state["positions"][code]
         shares = min(shares, position["shares"])
-        self.state["cash"] += shares * price
+        proceeds = shares * price
+        cost = shares * position["buy_price"]
+        pnl = proceeds - cost
+        self.state["cash"] += proceeds
         position["shares"] -= shares
-        action = "卖出 {} {} 股，成交价 {:.2f} 元，原因：{}".format(SIM_PLANS[code]["name"], shares, price, reason)
-        self.record(action)
-        self.state["trades"].append({"date": dt.date.today().isoformat(), "code": code, "shares": shares, "price": price, "reason": reason})
+        action = "卖出 {} {} 股，成交价 {:.2f} 元，原因：{}，本笔盈亏 {:+.2f} 元".format(
+            SIM_PLANS[code]["name"], shares, price, reason, pnl)
+        self.record(action, code=code, action="sell", price=price, shares=shares,
+                    value=proceeds, pnl=pnl, reason=reason,
+                    plan_version=self.state.get("start_date"))
         if position["shares"] == 0:
             del self.state["positions"][code]
         return action
 
-    def record(self, text):
-        self.state["trades"].append({"date": dt.datetime.now().strftime("%Y-%m-%d %H:%M"), "text": text})
+    def record(self, text, **fields):
+        trade = {"date": dt.datetime.now().strftime("%Y-%m-%d %H:%M"), "text": text}
+        trade.update(fields)
+        self.state["trades"].append(trade)
+
+    def period_summary(self, start, end):
+        trades = []
+        for trade in self.state.get("trades", []):
+            if trade.get("action") != "sell":
+                continue
+            day = trade.get("date", "")[:10]
+            if start <= day <= end:
+                trades.append(trade)
+        wins = [t for t in trades if t.get("pnl", 0) > 0]
+        losses = [t for t in trades if t.get("pnl", 0) < 0]
+        profit = sum(t.get("pnl", 0) for t in wins)
+        loss = sum(t.get("pnl", 0) for t in losses)
+        lines = ["## 周期复盘", "", "- 统计区间：{} 至 {}".format(start, end),
+                 "- 完成卖出笔数：{}".format(len(trades)),
+                 "- 盈利笔数/亏损笔数：{}/{}".format(len(wins), len(losses)),
+                 "- 胜率：{}".format("{:.1f}%".format(len(wins) / len(trades) * 100) if trades else "暂无样本"),
+                 "- 已实现盈亏：{:+.2f} 元".format(sum(t.get("pnl", 0) for t in trades)),
+                 "- 平均盈利/平均亏损：{:+.2f} / {:+.2f} 元".format(
+                     profit / len(wins) if wins else 0, loss / len(losses) if losses else 0),
+                 "- 盈亏比：{}".format("{:.2f}".format(profit / abs(loss)) if loss else ("暂无亏损样本" if not profit else "无亏损样本")),
+                 "", "| 股票 | 代码 | 完成卖出 | 盈利 | 亏损 | 已实现盈亏 |", "|---|---:|---:|---:|---:|---:|"]
+        for code, plan in SIM_PLANS.items():
+            items = [t for t in trades if t.get("code") == code]
+            if items:
+                lines.append("| {} | {} | {} | {} | {} | {:+.2f} |".format(
+                    plan["name"], code[-6:], len(items),
+                    sum(t.get("pnl", 0) > 0 for t in items),
+                    sum(t.get("pnl", 0) < 0 for t in items),
+                    sum(t.get("pnl", 0) for t in items)))
+        return lines
 
     def write_report(self, quotes):
         # 非交易时间或本次取行情失败时，沿用最后一次有效行情，避免估值被买入价覆盖
@@ -407,8 +447,28 @@ class SimulationTracker:
                 lines.append("- {}：{}".format(trade["date"], trade["text"]))
             else:
                 lines.append("- {}：卖出 {} 股，价格 {:.2f}，原因：{}".format(trade["date"], trade["code"], trade["price"], trade["reason"]))
+        report = "\n".join(lines) + "\n"
         with open(SIM_REPORT_FILE, "w", encoding="utf-8") as file:
-            file.write("\n".join(lines) + "\n")
+            file.write(report)
+
+        now = dt.datetime.now()
+        periods = (
+            ("daily", now.strftime("%Y-%m-%d.md"), now.date(), now.date()),
+            ("weekly", now.strftime("%Y-W%W.md"), now.date() - dt.timedelta(days=now.weekday()),
+             now.date() - dt.timedelta(days=now.weekday()) + dt.timedelta(days=6)),
+            ("monthly", now.strftime("%Y-%m.md"), now.date().replace(day=1),
+             (now.date().replace(day=28) + dt.timedelta(days=4)).replace(day=1) - dt.timedelta(days=1)),
+        )
+        for period, filename, start, end in periods:
+            directory = os.path.join(SIM_REPORT_ARCHIVE_DIR, period)
+            os.makedirs(directory, exist_ok=True)
+            archived = list(lines) + [""] + self.period_summary(start.isoformat(), end.isoformat()) + [""]
+            archived += ["## 优化纪律", "",
+                         "- 先累计样本再调参：单个周期完成卖出少于 20 笔时，只记录不改核心规则。",
+                         "- 优化目标同时看胜率、盈亏比、期望值和最大回撤，不能只看一笔输赢。",
+                         "- 若连续样本显示买入区间过高或止损过密，下一版计划只微调买入区间、止损距离和止盈分批。"]
+            with open(os.path.join(directory, filename), "w", encoding="utf-8") as file:
+                file.write("\n".join(archived) + "\n")
 
 
 class StockFloatWindow:

@@ -12,6 +12,7 @@ import urllib.request
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(BASE_DIR, "crypto_simulation_state.json")
 REPORT_FILE = os.path.join(BASE_DIR, "crypto_simulation_report.md")
+REPORT_ARCHIVE_DIR = os.path.join(BASE_DIR, "crypto_reports")
 POLL_SECONDS = 120
 SIM_CAPITAL = 100000.0  # 模拟资金 10 万 USDT
 PUSHPLUS_TOKEN = "e39674189a874c48888292f80e0c3464"
@@ -121,11 +122,45 @@ class CryptoTracker:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(self.state, f, ensure_ascii=False, indent=2)
 
-    def record_trade(self, symbol, text):
-        self.state["trades"].append({
+    def record_trade(self, symbol, text, **fields):
+        trade = {
             "time": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
             "symbol": symbol,
-            "text": text})
+            "text": text,
+        }
+        trade.update(fields)
+        self.state["trades"].append(trade)
+
+    def period_summary(self, start, end):
+        trades = []
+        for trade in self.state.get("trades", []):
+            if trade.get("action") != "sell":
+                continue
+            day = trade.get("time", "")[:10]
+            if start <= day <= end:
+                trades.append(trade)
+        wins = [t for t in trades if t.get("pnl", 0) > 0]
+        losses = [t for t in trades if t.get("pnl", 0) < 0]
+        profit = sum(t.get("pnl", 0) for t in wins)
+        loss = sum(t.get("pnl", 0) for t in losses)
+        lines = ["## 周期复盘", "", "- 统计区间：{} 至 {}".format(start, end),
+                 "- 完成卖出笔数：{}".format(len(trades)),
+                 "- 盈利笔数/亏损笔数：{}/{}".format(len(wins), len(losses)),
+                 "- 胜率：{}".format("{:.1f}%".format(len(wins) / len(trades) * 100) if trades else "暂无样本"),
+                 "- 已实现盈亏：{:+.2f} USDT".format(sum(t.get("pnl", 0) for t in trades)),
+                 "- 平均盈利/平均亏损：{:+.2f} / {:+.2f} USDT".format(
+                     profit / len(wins) if wins else 0, loss / len(losses) if losses else 0),
+                 "- 盈亏比：{}".format("{:.2f}".format(profit / abs(loss)) if loss else ("暂无亏损样本" if not profit else "无亏损样本")),
+                 "", "| 币种 | 完成卖出 | 盈利 | 亏损 | 已实现盈亏 |", "|---|---:|---:|---:|---:|"]
+        for symbol in PLANS:
+            items = [t for t in trades if t.get("symbol") == symbol]
+            if items:
+                lines.append("| {} | {} | {} | {} | {:+.2f} |".format(
+                    PLANS[symbol]["name"], len(items),
+                    sum(t.get("pnl", 0) > 0 for t in items),
+                    sum(t.get("pnl", 0) < 0 for t in items),
+                    sum(t.get("pnl", 0) for t in items)))
+        return lines
 
     def run_once(self):
         quotes = {}
@@ -261,7 +296,8 @@ class CryptoTracker:
         msg = "{} 第{idx}批建仓 {pct:.0f}%：买入 {amount:.2f} 枚 @{price:.4f}，金额 {spend:.0f} USDT（已建仓 {done}/{total} 批，均价 {avg:.4f}）".format(
             coin, idx=index + 1, pct=tranche["pct"] * 100, amount=amount, price=price,
             spend=spend, done=done, total=total, avg=pos["cost"] / pos["amount"])
-        self.record_trade(symbol, msg)
+        self.record_trade(symbol, msg, action="buy", price=price, amount=amount, value=spend,
+                          tranche=index + 1, plan_version=self.state.get("start_date"))
         return msg
 
     KIND_STYLE = {
@@ -328,7 +364,9 @@ class CryptoTracker:
         pnl = proceeds - cost_part
         msg = "{} {}，卖出 {:.2f} 枚 @{:.4f}，本批盈亏 {:+.2f} USDT".format(
             reason, PLANS[symbol]["name"], amount, price, pnl)
-        self.record_trade(symbol, msg)
+        self.record_trade(symbol, msg, action="sell", price=price, amount=amount,
+                          value=proceeds, pnl=pnl, reason=reason,
+                          plan_version=self.state.get("start_date"))
         if pos["amount"] < 1e-8:
             del self.state["positions"][symbol]
         return "【模拟成交】" + msg
@@ -418,8 +456,28 @@ class CryptoTracker:
             coin = PLANS.get(symbol, {}).get("name", symbol or "-")
             lines.append("| {} | {} | {} |".format(t["time"], coin, t["text"]))
 
+        report = "\n".join(lines) + "\n"
         with open(REPORT_FILE, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
+            f.write(report)
+
+        now = dt.datetime.now()
+        periods = (
+            ("daily", now.strftime("%Y-%m-%d.md"), now.date(), now.date()),
+            ("weekly", now.strftime("%Y-W%W.md"), now.date() - dt.timedelta(days=now.weekday()),
+             now.date() - dt.timedelta(days=now.weekday()) + dt.timedelta(days=6)),
+            ("monthly", now.strftime("%Y-%m.md"), now.date().replace(day=1),
+             (now.date().replace(day=28) + dt.timedelta(days=4)).replace(day=1) - dt.timedelta(days=1)),
+        )
+        for period, filename, start, end in periods:
+            directory = os.path.join(REPORT_ARCHIVE_DIR, period)
+            os.makedirs(directory, exist_ok=True)
+            archived = list(lines) + [""] + self.period_summary(start.isoformat(), end.isoformat()) + [""]
+            archived += ["## 优化纪律", "",
+                         "- 先累计样本再调参：单个周期完成卖出少于 20 笔时，只记录不改核心规则。",
+                         "- 优化目标同时看胜率、盈亏比、期望值和最大回撤，不能只看一笔输赢。",
+                         "- 若连续样本显示止损过密或买点过高，下一版计划只微调买入回撤、止损距离和仓位批次。"]
+            with open(os.path.join(directory, filename), "w", encoding="utf-8") as f:
+                f.write("\n".join(archived) + "\n")
 
 
 def main():
