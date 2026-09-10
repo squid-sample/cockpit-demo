@@ -347,8 +347,21 @@ class SimulationTracker:
         parts.append("<hr style='border:none;border-top:1px solid #eee'>")
         total_asset = self.state.get("last_asset", 0)
         total_pnl = alerts[-1].get("total_pnl", total_asset - SIM_CAPITAL)
-        parts.append("<p style='margin:4px 0'>整体浮盈：<b>{:+.2f} 元</b></p>".format(total_pnl))
-        parts.append("<p style='margin:4px 0'>当前总资产：<b>{:.2f} 元</b></p>".format(total_asset))
+        parts.append("<p style='margin:4px 0'>本金：<b>{:.0f} 元</b>；整体浮盈：<b>{:+.2f} 元</b>；当前总资产：<b>{:.2f} 元</b></p>".format(
+            SIM_CAPITAL, total_pnl, total_asset))
+        if self.state["positions"]:
+            parts.append("<p style='margin:4px 0'><b>全部持仓浮盈</b></p>")
+            parts.append("<table style='border-collapse:collapse;font-size:13px'><tr><th style='padding:2px 10px'>股票</th><th style='padding:2px 10px'>持仓市值</th><th style='padding:2px 10px'>浮盈</th><th style='padding:2px 10px'>收益率</th></tr>")
+            for code, pos in self.state["positions"].items():
+                cur = self.state.get("last_quotes", {}).get(code, {})
+                cur_price = cur.get("current", pos["buy_price"]) if cur else pos["buy_price"]
+                val = pos["shares"] * cur_price
+                cost = pos["shares"] * pos["buy_price"]
+                pnl = val - cost
+                pct = pnl / cost * 100 if cost else 0
+                parts.append("<tr><td style='padding:2px 10px'>{}</td><td style='padding:2px 10px'>{:.2f}</td><td style='padding:2px 10px'><b>{:+.2f}</b></td><td style='padding:2px 10px'>{:+.2f}%</td></tr>".format(
+                    SIM_PLANS.get(code, {}).get("name", code), val, pnl, pct))
+            parts.append("</table>")
         parts.append("<p style='color:#aaa;font-size:12px;margin:2px 0'>仅为程序模拟，不会真实下单，仅供研究参考</p>")
         parts.append("</div>")
         content = "".join(parts)
