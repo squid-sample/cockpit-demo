@@ -302,25 +302,30 @@ class CryptoTracker:
             marker = "{}-{}".format(today, key)
             if now.time() < target or self.state["summary_pushes"].get(marker):
                 continue
+            total = self.total_asset(quotes)
+            invested = sum(pos["cost"] for pos in self.state["positions"].values())
+            market_value = total - self.state["cash"]
             parts = [
                 "<div style='font-family:Microsoft YaHei,Arial;font-size:14px;line-height:1.7'>",
                 "<h3>{}加密货币持仓汇总 · {}</h3>".format(label, now.strftime("%Y-%m-%d %H:%M")),
-                "<p>计划期：{}；现金：{:.2f} USDT；总资产：{:.2f} USDT；浮动盈亏：<b>{:+.2f} USDT</b></p>".format(
-                    self.state.get("plan_id", PLAN_ID), self.state["cash"], self.total_asset(quotes),
-                    self.total_asset(quotes) - SIM_CAPITAL),
+                "<p>计划期：{}；剩余可用资金：{:.2f} USDT；已投入资产：{:.2f} USDT；持仓市值：{:.2f} USDT；总资产：{:.2f} USDT；浮动盈亏：<b>{:+.2f} USDT</b></p>".format(
+                    self.state.get("plan_id", PLAN_ID), self.state["cash"], invested, market_value, total,
+                    total - SIM_CAPITAL),
             ]
             if self.state["positions"]:
-                parts.append("<p><b>当前持仓</b></p><ul>")
+                parts.append("<p><b>当前持仓</b></p><table style='border-collapse:collapse'><tr><th>币种</th><th>数量</th><th>买入总金额</th><th>平均买入价</th><th>当前价格</th><th>当前市值</th><th>浮动盈亏</th><th>收益率</th></tr>")
                 for symbol, pos in self.state["positions"].items():
                     avg = pos["cost"] / pos["amount"] if pos["amount"] else 0
                     price = quotes.get(symbol, {}).get("price", avg)
-                    pnl = pos["amount"] * price - pos["cost"]
+                    value = pos["amount"] * price
+                    pnl = value - pos["cost"]
+                    pnl_pct = pnl / pos["cost"] * 100 if pos["cost"] else 0
                     plan = PLANS[symbol]
-                    parts.append("<li>{}：{:.2f} 枚，均价 {:.4f}，现价 {:.4f}，浮盈 <b>{:+.2f} USDT</b>；后续：止损 {}，止盈1 {}，止盈2 {}</li>".format(
-                        plan["name"], pos["amount"], avg, price, pnl, plan["stop"], plan["tp1"], plan["tp2"]))
-                parts.append("</ul>")
+                    parts.append("<tr><td>{}</td><td>{:.6f} 枚</td><td>{:.2f} USDT</td><td>{:.4f}</td><td>{:.4f}</td><td>{:.2f} USDT</td><td><b>{:+.2f} USDT</b></td><td>{:+.2f}%</td></tr>".format(
+                        plan["name"], pos["amount"], pos["cost"], avg, price, value, pnl, pnl_pct))
+                parts.append("</table>")
             else:
-                parts.append("<p>当前无持仓。</p>")
+                parts.append("<p>当前无持仓，已投入资产：0.00 USDT。</p>")
             parts.append("<p><b>后续计划</b>：按本期 plan.json 的分批买点执行；未持仓标的等待回踩买点，持仓标的按止损/止盈规则处理。</p>")
             parts.append("<p style='color:#aaa;font-size:12px'>仅为程序模拟，不会真实下单。</p></div>")
             push_async("币·{}持仓汇总".format(label), "".join(parts))
@@ -344,6 +349,13 @@ class CryptoTracker:
             if price:
                 parts.append("<p style='margin:2px 0'>当前价格：<b>{:.4f} USDT</b>（24h {:+.2f}%）</p>".format(
                     price, quotes[ev["symbol"]]["pct24"]))
+            pos = self.state["positions"].get(ev["symbol"])
+            if pos and pos["cost"]:
+                position_value = pos["amount"] * price
+                position_pnl = position_value - pos["cost"]
+                position_pnl_pct = position_pnl / pos["cost"] * 100
+                parts.append("<p style='margin:2px 0'>该币种当前浮盈：<b>{:+.2f} USDT（{:+.2f}%）</b>；持仓市值：{:.2f} USDT</p>".format(
+                    position_pnl, position_pnl_pct, position_value))
             parts.append("<p style='margin:2px 0'>{}</p>".format(ev["msg"]))
             budget_each = SIM_CAPITAL / len(PLANS)
             rows = []

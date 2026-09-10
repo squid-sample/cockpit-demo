@@ -222,27 +222,28 @@ class SimulationTracker:
         if now.time() < target or self.state["summary_pushes"].get(marker):
             return
         total = self.calculate_asset(quotes)
-        pnl_total = 0.0
+        invested = sum(position["shares"] * position["buy_price"] for position in self.state["positions"].values())
+        market_value = total - self.state["cash"]
         parts = [
             "<div style='font-family:Microsoft YaHei,Arial;font-size:14px;line-height:1.7'>",
             "<h3>A股收盘持仓汇总 · {}</h3>".format(now.strftime("%Y-%m-%d %H:%M")),
-            "<p>计划期：{}；现金：{:.2f} 元；总资产：{:.2f} 元；浮动盈亏：<b>{:+.2f} 元</b></p>".format(
-                self.state.get("plan_id", PLAN_ID), self.state["cash"], total, total - SIM_CAPITAL),
+            "<p>计划期：{}；剩余可用资金：{:.2f} 元；已投入资产：{:.2f} 元；持仓市值：{:.2f} 元；总资产：{:.2f} 元；浮动盈亏：<b>{:+.2f} 元</b></p>".format(
+                self.state.get("plan_id", PLAN_ID), self.state["cash"], invested, market_value, total, total - SIM_CAPITAL),
         ]
         if self.state["positions"]:
-            parts.append("<p><b>当前持仓</b></p><ul>")
+            parts.append("<p><b>当前持仓</b></p><table style='border-collapse:collapse'><tr><th>股票</th><th>股数</th><th>买入总金额</th><th>平均买入价</th><th>当前价格</th><th>当前市值</th><th>浮动盈亏</th><th>收益率</th></tr>")
             for code, position in self.state["positions"].items():
                 plan = SIM_PLANS[code]
                 price = quotes.get(code, {}).get("current", position["buy_price"])
+                cost = position["shares"] * position["buy_price"]
                 value = position["shares"] * price
-                pnl = value - position["shares"] * position["buy_price"]
-                pnl_total += pnl
-                parts.append("<li>{}：{} 股，买入价 {:.2f}，现价 {:.2f}，浮盈 <b>{:+.2f} 元</b>；后续：止损 {}，止盈1 {}，止盈2 {}</li>".format(
-                    plan["name"], position["shares"], position["buy_price"], price, pnl,
-                    plan["stop"], plan["tp1"], plan["tp2"]))
-            parts.append("</ul>")
+                pnl = value - cost
+                pnl_pct = pnl / cost * 100 if cost else 0
+                parts.append("<tr><td>{}</td><td>{} 股</td><td>{:.2f} 元</td><td>{:.2f}</td><td>{:.2f}</td><td>{:.2f} 元</td><td><b>{:+.2f} 元</b></td><td>{:+.2f}%</td></tr>".format(
+                    plan["name"], position["shares"], cost, position["buy_price"], price, value, pnl, pnl_pct))
+            parts.append("</table>")
         else:
-            parts.append("<p>当前无持仓。</p>")
+            parts.append("<p>当前无持仓，已投入资产：0.00 元。</p>")
         parts.append("<p><b>后续计划</b>：未持仓股票等待进入买入区间；已有持仓按止损、止盈1卖半、止盈2清仓规则执行。</p>")
         parts.append("<p style='color:#aaa;font-size:12px'>仅为程序模拟，不会真实下单。</p></div>")
         def worker():
@@ -289,6 +290,15 @@ class SimulationTracker:
             parts.append("<hr style='border:none;border-top:1px solid #eee'>")
             parts.append("<h3 style='color:{};margin:8px 0 4px'>{} · {}</h3>".format(
                 color, title, plan["name"]))
+            position = self.state["positions"].get(ev["code"])
+            if position and position["shares"]:
+                current_price = ev.get("price", position["buy_price"])
+                position_cost = position["shares"] * position["buy_price"]
+                position_value = position["shares"] * current_price
+                position_pnl = position_value - position_cost
+                position_pnl_pct = position_pnl / position_cost * 100 if position_cost else 0
+                parts.append("<p style='margin:2px 0'>该股票当前浮盈：<b>{:+.2f} 元（{:+.2f}%）</b>；持仓市值：{:.2f} 元</p>".format(
+                    position_pnl, position_pnl_pct, position_value))
             parts.append("<p style='margin:2px 0'>{}</p>".format(ev["text"]))
             parts.append(
                 "<table style='border-collapse:collapse;margin:6px 0;font-size:13px'>"

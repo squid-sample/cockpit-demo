@@ -131,7 +131,8 @@ description: "Screens Binance USDT spot crypto for half-month (15d) and one-mont
 
 ## 跟踪与微信推送落地（仓库脚本，已实施）
 
-推荐后若用户要跟踪，按 `scripts/strategy.md` 创建或更新计划目录中的 `plan.md`、`plan.json`，再重启通用脚本，不要复制新脚本。
+- 推荐后若用户要跟踪，按 `scripts/strategy.md` 的全局规范创建或更新计划目录中的 `plan.md`、`plan.json`，再重启通用脚本，不要复制新脚本。
+- 本 Skill 只负责加密货币推荐和专项买卖参数；账户统计口径、推送字段、记录复盘和脚本运行规则以 `scripts/strategy.md` 为准。
 
 ### 文件位置（仓库）
 
@@ -154,7 +155,8 @@ description: "Screens Binance USDT spot crypto for half-month (15d) and one-mont
 - 微信 PushPlus：`POST https://www.pushplus.plus/send`，`template=html`，token 存在脚本常量 `PUSHPLUS_TOKEN`
 - 纯标准库 `urllib.request` 发送，后台线程，失败静默不影响主循环
 - 邮件通道（163 SMTP SSL 465）已在脚本中实现但当前停用；恢复时在 `push_async`/`worker` 里加回 `push_email` 调用即可
-- 定时汇总：每天 09:00 和 17:50 各推送一次当前计划的持仓、浮盈、现金、总资产和后续计划；同一时段当天只推送一次，记录在当前计划 `state.json` 的 `summary_pushes` 字段
+- 定时汇总：每天 09:00 和 17:50 各推送一次当前计划的持仓、浮盈、剩余可用资金、已投入资产、持仓市值、总资产和后续计划；同一时段当天只推送一次，记录在当前计划 `state.json` 的 `summary_pushes` 字段。
+- 汇总中的每个持仓必须展示：持仓数量、买入总金额、平均买入价、当前价格、当前市值、浮动盈亏和收益率；不能只展示持有数量。
 - 测试推送：构造 events 调 `build_push_html()` + `push_wechat()` 验证，发完即删临时脚本
 
 ### 推送标题命名规范（一眼看懂是什么信号）
@@ -163,7 +165,7 @@ description: "Screens Binance USDT spot crypto for half-month (15d) and one-mont
 - 多条：`币·N条信号：LINK 建仓 @12.65、TIA 止盈卖半 @0.52`
 - 动作枚举：建仓 / 止盈卖半 / 止盈清仓 / 止损清仓 / 计划到期
 - A 股前缀为 `股·`，股票名+动作+@价格
-- 正文 HTML：颜色标题（建仓绿/止盈1橙/止盈2青绿/止损红/到期灰）+ 三批建仓计划表（买点、仓位%、金额）+ 止损止盈价 + 账户总资产
+- 正文 HTML：颜色标题（建仓绿/止盈1橙/止盈2青绿/止损红/到期灰）+ 单个币种当前浮盈/收益率/持仓市值 + 三批建仓计划表（买点、仓位%、金额）+ 止损止盈价 + 账户总资产
 
 ### 更新推荐计划的步骤
 
