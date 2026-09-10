@@ -29,6 +29,14 @@ PLAN_ID = PLAN_CONFIG["plan_id"]
 PLAN_DATE = PLAN_CONFIG["plan_date"]
 PLANS = PLAN_CONFIG["plans"]
 
+# 动态调整参数
+COOLDOWN_HOURS = 48          # 止损清仓后冷却小时数
+TRAILING_TP_PCT = 0.08       # 止盈1后追踪止盈回撤比例
+OPPORTUNITY_THRESHOLD = 0.10 # 未建仓但远离买点10%触发机会提示
+MOMENTUM_15D_MIN = 0.05      # 15天动量最低5%算有行情
+MOMENTUM_30D_MIN = 0.10       # 30天动量最低10%算有行情
+EXTENDED_OBSERVATION_DAYS = 5  # 到期后持续观察天数
+
 
 def plan_buy_low(plan):
     return plan["tranches"][-1]["price"]
@@ -36,6 +44,49 @@ def plan_buy_low(plan):
 
 def plan_buy_high(plan):
     return plan["tranches"][0]["price"]
+
+
+def round_price(price):
+    if price >= 100:
+        return round(price, 2)
+    elif price >= 1:
+        return round(price, 4)
+    else:
+        return round(price, 6)
+
+
+def fetch_klines(symbol, interval="1d", limit=30):
+    url = "{}/api/v3/klines?symbol={}&interval={}&limit={}".format(
+        BINANCE, symbol, interval, limit)
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def calc_momentum(symbol):
+    try:
+        k15 = fetch_klines(symbol, "1d", 16)
+        k30 = fetch_klines(symbol, "1d", 31)
+        pct_15d = (float(k15[-1][4]) - float(k15[0][4])) / float(k15[0][4])
+        pct_30d = (float(k30[-1][4]) - float(k30[0][4])) / float(k30[0][4])
+        return {"pct_15d": pct_15d, "pct_30d": pct_30d}
+    except Exception:
+        return {"pct_15d": 0.0, "pct_30d": 0.0}
+
+
+def generate_dynamic_plan(symbol, current_price, name, logic):
+    return {
+        "name": name,
+        "tranches": [
+            {"price": round_price(current_price * 0.97), "pct": 0.5},
+            {"price": round_price(current_price * 0.95), "pct": 0.3},
+            {"price": round_price(current_price * 0.93), "pct": 0.2},
+        ],
+        "stop": round_price(current_price * 0.91),
+        "tp1": round_price(current_price * 1.08),
+        "tp2": round_price(current_price * 1.15),
+        "logic": "动态重新筛选：" + logic,
+    }
 
 
 def fetch_ticker(symbol):
@@ -88,6 +139,11 @@ class CryptoTracker:
                 state.setdefault("summary_pushes", {})
                 state.setdefault("plan_id", PLAN_ID)
                 state.setdefault("plan_date", PLAN_DATE)
+                state.setdefault("cooldown", {})
+                state.setdefault("cycle_done", {})
+                state.setdefault("dynamic_plans", {})
+                state.setdefault("opportunity_pushed", {})
+                state.setdefault("rescreened", {})
                 return state
             except (OSError, ValueError):
                 pass
@@ -101,6 +157,11 @@ class CryptoTracker:
             "trades": [],
             "last_quotes": {},
             "summary_pushes": {},
+            "cooldown": {},
+            "cycle_done": {},
+            "dynamic_plans": {},
+            "opportunity_pushed": {},
+            "rescreened": {},
         }
 
     def save_state(self):
@@ -115,6 +176,9 @@ class CryptoTracker:
         }
         trade.update(fields)
         self.state["trades"].append(trade)
+
+    def effective_plan(self, symbol):
+        return self.state.get("dynamic_plans", {}).get(symbol) or PLANS[symbol]
 
     def period_summary(self, start, end):
         trades = []
@@ -161,26 +225,29 @@ class CryptoTracker:
 
         events = []
         budget_each = SIM_CAPITAL / len(PLANS)
+        now = dt.datetime.now()
         for symbol, plan in PLANS.items():
             q = quotes.get(symbol)
             if not q:
                 continue
             price = q["price"]
             pos = self.state["positions"].get(symbol)
+            ep = self.effective_plan(symbol)
 
             if pos:
-                # 持仓中：止损价之上才允许补仓（破位时不补，直接走止损）
-                for i, tr in enumerate(plan["tranches"]):
-                    if not pos["tranches_done"][i] and plan["stop"] < price <= tr["price"]:
+                # --- 持仓中 ---
+                # 补仓：止损价之上才允许补仓
+                for i, tr in enumerate(ep["tranches"]):
+                    if i < len(pos["tranches_done"]) and not pos["tranches_done"][i] and ep["stop"] < price <= tr["price"]:
                         msg = self.buy_tranche(symbol, price, i, tr, budget_each)
                         if msg:
                             events.append({"symbol": symbol, "kind": "buy", "msg": msg})
-                # 注意：补仓后 pos 引用仍有效；止损止盈判断用最新持仓
                 pos = self.state["positions"].get(symbol)
                 if pos:
-                    # 止盈1后止损上移到综合成本价（最坏不亏）
                     avg = pos["cost"] / pos["amount"] if pos["amount"] else 0
-                    stop_price = max(plan["stop"], avg) if pos["tp1_done"] else plan["stop"]
+                    stop_price = max(ep["stop"], avg) if pos["tp1_done"] else ep["stop"]
+
+                    # 止损清仓
                     if price <= stop_price:
                         event_value = pos["amount"] * price
                         event_pnl = event_value - pos["cost"]
@@ -192,7 +259,12 @@ class CryptoTracker:
                                        "position_pnl": event_pnl,
                                        "position_pnl_pct": event_pnl_pct,
                                        "position_value": event_value})
-                    elif not pos["tp1_done"] and price >= plan["tp1"]:
+                        # 设冷却期：48小时内不再建仓
+                        cooldown_until = now + dt.timedelta(hours=COOLDOWN_HOURS)
+                        self.state.setdefault("cooldown", {})[symbol] = cooldown_until.strftime("%Y-%m-%d %H:%M")
+
+                    # 止盈1：卖一半，止损上移成本价，记录峰值
+                    elif not pos["tp1_done"] and price >= ep["tp1"]:
                         event_value = pos["amount"] * price
                         event_pnl = event_value - pos["cost"]
                         event_pnl_pct = event_pnl / pos["cost"] * 100 if pos["cost"] else 0
@@ -203,41 +275,131 @@ class CryptoTracker:
                                        "position_pnl_pct": event_pnl_pct,
                                        "position_value": event_value})
                         self.state["positions"][symbol]["tp1_done"] = True
-                    elif pos["tp1_done"] and price >= plan["tp2"]:
-                        event_value = pos["amount"] * price
-                        event_pnl = event_value - pos["cost"]
-                        event_pnl_pct = event_pnl / pos["cost"] * 100 if pos["cost"] else 0
-                        msg = self.close(symbol, price, pos["amount"], "到达止盈2，清仓")
-                        events.append({"symbol": symbol, "kind": "tp2", "msg": msg,
-                                       "position_pnl": event_pnl,
-                                       "position_pnl_pct": event_pnl_pct,
-                                       "position_value": event_value})
-            elif self.state["plan_expired"].get(symbol):
-                # 计划已到期暂停，不再建仓
-                pass
+                        self.state["positions"][symbol]["peak_price"] = price
+
+                    # 止盈2 / 追踪止盈
+                    elif pos["tp1_done"]:
+                        peak = pos.get("peak_price", price)
+                        if price > peak:
+                            pos["peak_price"] = price
+                            peak = price
+                        trailing_stop = peak * (1 - TRAILING_TP_PCT)
+                        if price >= ep["tp2"]:
+                            event_value = pos["amount"] * price
+                            event_pnl = event_value - pos["cost"]
+                            event_pnl_pct = event_pnl / pos["cost"] * 100 if pos["cost"] else 0
+                            msg = self.close(symbol, price, pos["amount"], "到达止盈2，清仓")
+                            events.append({"symbol": symbol, "kind": "tp2", "msg": msg,
+                                           "position_pnl": event_pnl,
+                                           "position_pnl_pct": event_pnl_pct,
+                                           "position_value": event_value})
+                            self.state.setdefault("cycle_done", {})[symbol] = True
+                        elif price <= trailing_stop:
+                            event_value = pos["amount"] * price
+                            event_pnl = event_value - pos["cost"]
+                            event_pnl_pct = event_pnl / pos["cost"] * 100 if pos["cost"] else 0
+                            reason = "追踪止盈（最高点 {:.4f} 回撤 {:.0f}%），清仓".format(
+                                peak, TRAILING_TP_PCT * 100)
+                            msg = self.close(symbol, price, pos["amount"], reason)
+                            events.append({"symbol": symbol, "kind": "tp2", "msg": msg,
+                                           "position_pnl": event_pnl,
+                                           "position_pnl_pct": event_pnl_pct,
+                                           "position_value": event_value})
+                            self.state.setdefault("cycle_done", {})[symbol] = True
+
             else:
-                # 空仓
+                # --- 空仓 ---
+                # 冷却期内不建仓
+                cooldown_str = self.state.get("cooldown", {}).get(symbol)
+                if cooldown_str:
+                    try:
+                        cooldown_time = dt.datetime.strptime(cooldown_str, "%Y-%m-%d %H:%M")
+                        if now < cooldown_time:
+                            continue
+                    except ValueError:
+                        pass
+
+                # 止盈2清仓后本期不再用旧参数重建仓
+                if self.state.get("cycle_done", {}).get(symbol):
+                    continue
+
+                # 计划已移除
+                if self.state["plan_expired"].get(symbol):
+                    continue
+
                 days = (dt.date.today() - dt.date.fromisoformat(self.state["start_date"])).days
+                buy_high = ep["tranches"][0]["price"]
+
+                # 计划到期：重新跑动量筛选
                 if days >= PLAN_VALID_DAYS:
-                    # 计划超时未建仓：到期提醒并暂停
-                    self.state["plan_expired"][symbol] = True
-                    events.append({
-                        "symbol": symbol, "kind": "expire",
-                        "msg": "建仓计划 {} 天未触发任何买点，已暂停自动建仓，建议重新评估行情后更新计划".format(days)})
-                elif price <= plan["stop"]:
-                    # 还没建仓就跌破止损位：形态失效，计划作废不再买入
+                    mom = calc_momentum(symbol)
+                    has_momentum = (mom["pct_15d"] >= MOMENTUM_15D_MIN or
+                                    mom["pct_30d"] >= MOMENTUM_30D_MIN)
+
+                    if has_momentum:
+                        if not self.state.get("rescreened", {}).get(symbol):
+                            new_plan = generate_dynamic_plan(
+                                symbol, price, plan["name"], plan.get("logic", ""))
+                            self.state.setdefault("dynamic_plans", {})[symbol] = new_plan
+                            self.state.setdefault("rescreened", {})[symbol] = True
+                            ep = new_plan
+                            buy_high = ep["tranches"][0]["price"]
+                            events.append({
+                                "symbol": symbol, "kind": "rescreen",
+                                "msg": "计划到期重新筛选：15d动量 {pct_15d:+.2%}，30d动量 {pct_30d:+.2%}，已生成新买点 @{price:.4f}（买点 {bp1:.4f}/{bp2:.4f}/{bp3:.4f}，止损 {stop:.4f}，止盈 {tp1:.4f}/{tp2:.4f}）".format(
+                                    pct_15d=mom["pct_15d"], pct_30d=mom["pct_30d"], price=price,
+                                    bp1=ep["tranches"][0]["price"], bp2=ep["tranches"][1]["price"],
+                                    bp3=ep["tranches"][2]["price"], stop=ep["stop"],
+                                    tp1=ep["tp1"], tp2=ep["tp2"])})
+                    else:
+                        # 无行情：末期才移除，否则持续观察
+                        if days >= PLAN_VALID_DAYS + EXTENDED_OBSERVATION_DAYS:
+                            self.state["plan_expired"][symbol] = True
+                            events.append({
+                                "symbol": symbol, "kind": "expire",
+                                "msg": "计划到期后持续观察 {} 天仍无行情（15d {pct_15d:+.2%}，30d {pct_30d:+.2%}），移出本期".format(
+                                    EXTENDED_OBSERVATION_DAYS,
+                                    pct_15d=mom["pct_15d"], pct_30d=mom["pct_30d"])})
+                            continue
+                        else:
+                            today_str = now.date().isoformat()
+                            observe_key = symbol + "_observe"
+                            if self.state.get("opportunity_pushed", {}).get(observe_key) != today_str:
+                                self.state.setdefault("opportunity_pushed", {})[observe_key] = today_str
+                                events.append({
+                                    "symbol": symbol, "kind": "rescreen",
+                                    "msg": "计划到期但暂无行情（15d {pct_15d:+.2%}，30d {pct_30d:+.2%}），持续观察中（第 {day} 天）".format(
+                                        pct_15d=mom["pct_15d"], pct_30d=mom["pct_30d"], day=days)})
+                            continue
+
+                # 未建仓就跌破止损位：计划作废
+                if price <= ep["stop"]:
                     self.state["plan_expired"][symbol] = True
                     events.append({
                         "symbol": symbol, "kind": "expire",
                         "msg": "价格 {:.4f} 已跌破止损位 {}，建仓形态失效，计划作废不再买入".format(
-                            price, plan["stop"])})
-                else:
-                    # 计划有效期内，按分批买点逐批建仓（价格跌破哪个点位就买对应批次）
-                    for i, tr in enumerate(plan["tranches"]):
-                        if price <= tr["price"]:
-                            msg = self.buy_tranche(symbol, price, i, tr, budget_each)
-                            if msg:
-                                events.append({"symbol": symbol, "kind": "buy", "msg": msg})
+                            price, ep["stop"])})
+                    continue
+
+                # 未建仓但大涨：机会提示（每天最多1条）
+                if price > buy_high * (1 + OPPORTUNITY_THRESHOLD):
+                    today_str = now.date().isoformat()
+                    opp_key = symbol + "_opp"
+                    if self.state.get("opportunity_pushed", {}).get(opp_key) != today_str:
+                        mom = calc_momentum(symbol)
+                        if mom["pct_15d"] >= MOMENTUM_15D_MIN:
+                            self.state.setdefault("opportunity_pushed", {})[opp_key] = today_str
+                            events.append({
+                                "symbol": symbol, "kind": "opportunity",
+                                "msg": "价格 {:.4f} 已远离买点 {:.4f}（+{:.1f}%），15d动量 {:+.2%}，关注回踩机会".format(
+                                    price, buy_high, (price / buy_high - 1) * 100, mom["pct_15d"])})
+
+                # 按分批买点建仓
+                for i, tr in enumerate(ep["tranches"]):
+                    if price <= tr["price"]:
+                        msg = self.buy_tranche(symbol, price, i, tr, budget_each)
+                        if msg:
+                            events.append({"symbol": symbol, "kind": "buy", "msg": msg})
 
         for event in events:
             position = self.state["positions"].get(event["symbol"])
@@ -267,6 +429,8 @@ class CryptoTracker:
         "tp2": "止盈清仓",
         "stop": "止损清仓",
         "expire": "计划到期",
+        "rescreen": "重新筛选",
+        "opportunity": "机会提示",
     }
 
     def build_push_title(self, events, quotes):
@@ -300,7 +464,7 @@ class CryptoTracker:
         amount = spend / price
         pos = self.state["positions"].setdefault(symbol, {
             "amount": 0.0, "cost": 0.0,
-            "tranches_done": [False] * len(PLANS[symbol]["tranches"]),
+            "tranches_done": [False] * len(self.effective_plan(symbol)["tranches"]),
             "buy_time": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
             "tp1_done": False})
         self.state["cash"] -= spend
@@ -320,9 +484,11 @@ class CryptoTracker:
     KIND_STYLE = {
         "buy": ("分批建仓成交", "#16a34a"),
         "tp1": ("到达止盈1（卖出一半，止损上移成本）", "#d97706"),
-        "tp2": ("到达止盈2（清仓）", "#0d9488"),
+        "tp2": ("到达止盈2/追踪止盈（清仓）", "#0d9488"),
         "stop": ("触发止损（清仓）", "#dc2626"),
-        "expire": ("计划到期未建仓", "#6b7280"),
+        "expire": ("计划到期/移除", "#6b7280"),
+        "rescreen": ("到期重新筛选", "#3b82f6"),
+        "opportunity": ("大涨机会提示", "#8b5cf6"),
     }
 
     def closed_trade_records(self):
@@ -357,7 +523,7 @@ class CryptoTracker:
                     value = pos["amount"] * price
                     pnl = value - pos["cost"]
                     pnl_pct = pnl / pos["cost"] * 100 if pos["cost"] else 0
-                    plan = PLANS[symbol]
+                    plan = self.effective_plan(symbol)
                     parts.append("<tr><td>{}</td><td>{:.2f}</td><td>{:.4f}</td><td>{:.4f}</td><td>{:.2f}</td><td><b>{:+.2f} USDT</b></td><td>{:+.2f}%</td></tr>".format(
                         plan["name"], pos["cost"], avg, price, value, pnl, pnl_pct))
                 parts.append("</table>")
@@ -368,13 +534,15 @@ class CryptoTracker:
                 parts.append("<p><b>已清仓记录（已实现盈亏）</b></p><table style='border-collapse:collapse'><tr><th>时间</th><th>币种</th><th>卖出金额（USDT）</th><th>投入成本（USDT）</th><th>已实现浮盈/浮亏</th></tr>")
                 for trade in closed[-20:]:
                     cost = trade.get("cost", trade.get("value", 0) - trade.get("pnl", 0))
+                    sym = trade.get("symbol", "")
+                    name = self.effective_plan(sym).get("name", sym or "-") if sym else "-"
                     parts.append("<tr><td>{}</td><td>{}</td><td>{:.2f}</td><td>{:.2f}</td><td><b>{:+.2f} USDT</b></td></tr>".format(
-                        trade.get("time", "-"), PLANS.get(trade.get("symbol"), {}).get("name", trade.get("symbol", "-")),
+                        trade.get("time", "-"), name,
                         trade.get("value", 0), cost, trade.get("pnl", 0)))
                 parts.append("</table>")
             else:
                 parts.append("<p>暂无已清仓记录。</p>")
-            parts.append("<p><b>后续计划</b>：按本期 plan.json 的分批买点执行；未持仓标的等待回踩买点，持仓标的按止损/止盈规则处理。</p>")
+            parts.append("<p><b>后续计划</b>：持仓标的按止损/止盈规则处理；止盈2清仓后本期不再用旧参数重建仓；止损清仓后48小时冷却；计划到期后重新筛选，有行情生成新买点，无行情持续观察至末期移除。</p>")
             parts.append("<p style='color:#aaa;font-size:12px'>仅为程序模拟，不会真实下单。</p></div>")
             push_async("币·{}持仓汇总（本金{:.0f}U）".format(label, SIM_CAPITAL), "".join(parts))
             self.state["summary_pushes"][marker] = now.strftime("%Y-%m-%d %H:%M")
@@ -388,7 +556,7 @@ class CryptoTracker:
                 dt.datetime.now().strftime("%Y-%m-%d %H:%M")),
         ]
         for ev in events:
-            plan = PLANS[ev["symbol"]]
+            plan = self.effective_plan(ev["symbol"])
             title, color = self.KIND_STYLE[ev["kind"]]
             price = quotes.get(ev["symbol"], {}).get("price")
             parts.append("<hr style='border:none;border-top:1px solid #eee'>")
@@ -469,8 +637,8 @@ class CryptoTracker:
             "",
             "- 计划期：{}".format(self.state.get("plan_id", PLAN_ID)),
             "- 计划制定日期：{}".format(self.state.get("plan_date", PLAN_DATE)),
-            "- 开始跟踪日期：{}（计划有效期 {} 天，到期未建仓自动暂停）".format(
-                self.state["start_date"], PLAN_VALID_DAYS),
+            "- 开始跟踪日期：{}（计划有效期 {} 天，到期重新筛选，无行情持续观察 {} 天后移除）".format(
+                self.state["start_date"], PLAN_VALID_DAYS, EXTENDED_OBSERVATION_DAYS),
             "- 模拟资金：{:.0f} USDT（每币分配约 {:.0f}）".format(SIM_CAPITAL, SIM_CAPITAL / len(PLANS)),
             "- 剩余可用资金：{:.2f} USDT".format(self.state["cash"]),
             "- 当前持仓投入：{:.2f} USDT".format(sum(pos["cost"] for pos in self.state["positions"].values())),
@@ -501,22 +669,31 @@ class CryptoTracker:
                 lines.append("| {} | - | - | 无行情 |".format(p["name"]))
                 continue
             price = q["price"]
+            ep = self.effective_plan(symbol)
             pos = self.state["positions"].get(symbol)
             if pos:
                 done = sum(pos["tranches_done"])
                 status = "持仓中（已建仓 {}/{} 批）".format(done, len(pos["tranches_done"]))
+            elif self.state.get("cycle_done", {}).get(symbol):
+                status = "已止盈2清仓（本期不再用旧参数重建仓）"
+            elif self.state.get("cooldown", {}).get(symbol):
+                status = "冷却中（止损后 {} 内不建仓）".format(self.state["cooldown"][symbol])
             elif self.state["plan_expired"].get(symbol):
-                status = "⚠️ 计划已暂停（到期未建仓或破位作废）"
-            elif price <= p["stop"]:
+                status = "已移除（到期无行情或破位作废）"
+            elif self.state.get("dynamic_plans", {}).get(symbol):
+                status = "动态计划（重新筛选后买点 {}/{}/{}, 止损 {}）".format(
+                    ep["tranches"][0]["price"], ep["tranches"][1]["price"],
+                    ep["tranches"][2]["price"], ep["stop"])
+            elif price <= ep["stop"]:
                 status = "已破止损位（计划作废）"
-            elif price <= plan_buy_low(p):
+            elif price <= plan_buy_low(ep):
                 status = "**第三批买点内**"
-            elif price <= plan_buy_high(p):
+            elif price <= plan_buy_high(ep):
                 status = "**建仓区间内（等分批触发）**"
             else:
                 status = "高于第一批买点（等回踩）"
             lines.append("| {} | {:.4f} | {:+.2f}% | {} |".format(
-                p["name"], price, q["pct24"], status))
+                ep["name"], price, q["pct24"], status))
 
         lines += ["", "## 当前持仓", "",
                   "| 币种 | 数量 | 均价 | 最新价 | 市值 | 成本 | 浮动盈亏 | 建仓批次 |",
@@ -529,7 +706,7 @@ class CryptoTracker:
                 pnl = value - pos["cost"]
                 done = sum(pos["tranches_done"])
                 lines.append("| {} | {:.2f} | {:.4f} | {:.4f} | {:.2f} | {:.2f} | {:+.2f}（{:+.2f}%） | {}/{} 批 |".format(
-                    PLANS[symbol]["name"], pos["amount"], avg, price, value, pos["cost"],
+                    self.effective_plan(symbol)["name"], pos["amount"], avg, price, value, pos["cost"],
                     pnl, (price - avg) / avg * 100 if avg else 0,
                     done, len(pos["tranches_done"])))
         else:
@@ -538,7 +715,7 @@ class CryptoTracker:
         lines += ["", "## 交易记录", "", "| 时间 | 币种 | 记录 |", "|---|---|---|"]
         for t in self.state["trades"][-30:]:
             symbol = t.get("symbol", "")
-            coin = PLANS.get(symbol, {}).get("name", symbol or "-")
+            coin = self.effective_plan(symbol).get("name", symbol or "-") if symbol else "-"
             lines.append("| {} | {} | {} |".format(t["time"], coin, t["text"]))
 
         report = "\n".join(lines) + "\n"
