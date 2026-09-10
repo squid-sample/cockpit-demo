@@ -19,22 +19,17 @@ with open(os.path.join(PLAN_DIR, "plan.json"), "r", encoding="utf-8") as f:
 STATE_FILE = os.path.join(PLAN_DIR, "state.json")
 REPORT_FILE = os.path.join(PLAN_DIR, "report.md")
 REPORT_ARCHIVE_DIR = os.path.join(BASE_DIR, "crypto_reports")
-POLL_SECONDS = 120
 SIM_CAPITAL = float(PLAN_CONFIG["capital"])
 PUSHPLUS_TOKEN = "e39674189a874c48888292f80e0c3464"
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
 BINANCE = "https://data-api.binance.vision"
-PLAN_VALID_DAYS = int(PLAN_CONFIG["valid_days"])
 PLAN_ID = PLAN_CONFIG["plan_id"]
 PLAN_DATE = PLAN_CONFIG["plan_date"]
 PLANS = PLAN_CONFIG["plans"]
 
-# 动态调整参数
+# 动态调整参数（固定策略参数，不随风格变化）
 COOLDOWN_HOURS = 48          # 止损清仓后冷却小时数
-TRAILING_TP_PCT = 0.08       # 止盈1后追踪止盈回撤比例
 OPPORTUNITY_THRESHOLD = 0.10 # 未建仓但远离买点10%触发机会提示
-MOMENTUM_15D_MIN = 0.05      # 15天动量最低5%算有行情
-MOMENTUM_30D_MIN = 0.10       # 30天动量最低10%算有行情
 EXTENDED_OBSERVATION_DAYS = 5  # 到期后持续观察天数
 
 # 稳定币和杠杆代币排除
@@ -66,6 +61,87 @@ def fetch_klines(symbol, interval="1d", limit=30):
         return json.loads(resp.read().decode("utf-8"))
 
 
+# ====== 交易风格驱动体系 ======
+# 用户只需指定风格，所有参数自动推导
+
+STYLE_PROFILES = {
+    "超短线": {
+        "desc": "1-3天，抓短线爆发",
+        "kline_interval": "1h",    # 1小时K线
+        "atr_period": 24,           # 24小时
+        "ema_short": 12,            # 12小时EMA
+        "ema_long": 26,             # 26小时EMA
+        "rsi_period": 14,
+        "fib_lookback": 48,         # 48小时高低点
+        "stop_atr_mult": 1.5,       # 止损=1.5×ATR
+        "tp1_atr_mult": 2.0,        # 止盈1=2×ATR
+        "tp2_atr_mult": 3.5,        # 止盈2=3.5×ATR
+        "valid_days": 3,            # 计划有效期3天
+        "tranche_spacing": 0.5,    # 批次间距=0.5×ATR
+        "poll_seconds": 60,         # 1分钟轮询
+    },
+    "短线": {
+        "desc": "1-2周，波段交易",
+        "kline_interval": "4h",     # 4小时K线
+        "atr_period": 30,           # 5天×6根
+        "ema_short": 20,
+        "ema_long": 50,
+        "rsi_period": 14,
+        "fib_lookback": 60,
+        "stop_atr_mult": 2.0,
+        "tp1_atr_mult": 3.0,
+        "tp2_atr_mult": 5.0,
+        "valid_days": 14,
+        "tranche_spacing": 1.0,
+        "poll_seconds": 120,
+    },
+    "中线": {
+        "desc": "1-3月，趋势跟踪",
+        "kline_interval": "1d",     # 日线
+        "atr_period": 30,           # 30天
+        "ema_short": 20,
+        "ema_long": 50,
+        "rsi_period": 14,
+        "fib_lookback": 90,
+        "stop_atr_mult": 3.0,
+        "tp1_atr_mult": 5.0,
+        "tp2_atr_mult": 8.0,
+        "valid_days": 90,
+        "tranche_spacing": 1.5,
+        "poll_seconds": 300,        # 5分钟轮询
+    },
+    "长线": {
+        "desc": "3-12月，长周期布局",
+        "kline_interval": "1d",     # 日线（周线辅助确认）
+        "atr_period": 60,           # 60天
+        "ema_short": 50,            # 50日EMA
+        "ema_long": 120,            # 120日EMA
+        "rsi_period": 14,
+        "fib_lookback": 180,
+        "stop_atr_mult": 4.0,
+        "tp1_atr_mult": 8.0,
+        "tp2_atr_mult": 15.0,
+        "valid_days": 365,
+        "tranche_spacing": 2.0,
+        "poll_seconds": 600,        # 10分钟轮询
+    },
+}
+
+
+def get_style_profile():
+    """从plan.json读取风格，默认短线"""
+    style = PLAN_CONFIG.get("style", "短线")
+    return STYLE_PROFILES.get(style, STYLE_PROFILES["短线"]), style
+
+
+STYLE, STYLE_NAME = get_style_profile()
+
+# 风格驱动的参数（不再硬编码）
+POLL_SECONDS = STYLE["poll_seconds"]
+PLAN_VALID_DAYS = STYLE["valid_days"]
+TRAILING_TP_PCT = 0.04 + STYLE["stop_atr_mult"] * 0.02  # 追踪止盈回撤比例，随风格波动率自适应
+
+
 # ====== 多时间框架技术分析 ======
 
 def calc_ema(closes, period):
@@ -79,8 +155,10 @@ def calc_ema(closes, period):
     return ema
 
 
-def calc_atr(klines, period=30):
-    """30天ATR（真实波动幅度）"""
+def calc_atr(klines, period=None):
+    """ATR（真实波动幅度），period默认用风格配置"""
+    if period is None:
+        period = STYLE["atr_period"]
     if len(klines) < period + 1:
         period = len(klines) - 1
     if period < 5:
@@ -96,8 +174,10 @@ def calc_atr(klines, period=30):
     return sum(trs[-period:]) / period
 
 
-def calc_rsi(klines, period=14):
-    """RSI相对强弱指标"""
+def calc_rsi(klines, period=None):
+    """RSI相对强弱指标，period默认用风格配置"""
+    if period is None:
+        period = STYLE["rsi_period"]
     closes = [float(k[4]) for k in klines]
     if len(closes) < period + 1:
         return 50.0
@@ -114,8 +194,10 @@ def calc_rsi(klines, period=14):
     return 100 - (100 / (1 + rs))
 
 
-def calc_fibonacci(klines, lookback=60):
+def calc_fibonacci(klines, lookback=None):
     """斐波那契回调位：取最近一波行情的高低点"""
+    if lookback is None:
+        lookback = STYLE["fib_lookback"]
     n = min(lookback, len(klines))
     highs = [float(k[2]) for k in klines[-n:]]
     lows = [float(k[3]) for k in klines[-n:]]
@@ -147,8 +229,10 @@ def calc_fibonacci(klines, lookback=60):
         }
 
 
-def find_swing_levels(klines, lookback=20):
+def find_swing_levels(klines, lookback=None):
     """识别关键支撑阻力位"""
+    if lookback is None:
+        lookback = min(STYLE["fib_lookback"], 20)
     highs = [float(k[2]) for k in klines[-lookback:]]
     lows = [float(k[3]) for k in klines[-lookback:]]
     return {
@@ -196,21 +280,22 @@ def detect_candle_patterns(klines):
 
 
 def analyze_trend(klines):
-    """判断趋势方向：bull/bear/range"""
+    """判断趋势方向：bull/bear/range，EMA周期由风格决定"""
     closes = [float(k[4]) for k in klines]
-    if len(closes) < 20:
+    es, el = STYLE["ema_short"], STYLE["ema_long"]
+    if len(closes) < es:
         return "unknown"
-    ema20 = calc_ema(closes, 20)
+    ema_short = calc_ema(closes, es)
     current = closes[-1]
-    if not ema20:
+    if not ema_short:
         return "unknown"
-    if len(closes) >= 50:
-        ema50 = calc_ema(closes, 50)
-        if ema50 and ema20 > ema50 and current > ema20:
+    if len(closes) >= el:
+        ema_long = calc_ema(closes, el)
+        if ema_long and ema_short > ema_long and current > ema_short:
             return "bull"
-        if ema50 and ema20 < ema50 and current < ema20:
+        if ema_long and ema_short < ema_long and current < ema_short:
             return "bear"
-    if current > ema20:
+    if current > ema_short:
         return "bull_weak"
     return "range"
 
@@ -244,25 +329,29 @@ def check_btc_crash():
 
 
 def analyze_symbol(symbol):
-    """综合多时间框架技术分析，生成建仓计划"""
+    """综合多时间框架技术分析，所有参数由交易风格驱动"""
+    interval = STYLE["kline_interval"]
     try:
+        # 主时间框架：按风格选择K线周期
+        klines = fetch_klines(symbol, interval, max(STYLE["fib_lookback"], STYLE["ema_long"] + STYLE["atr_period"] + 10))
+        # 辅助：日线始终获取用于多时间框架确认
         daily = fetch_klines(symbol, "1d", 60)
         weekly = fetch_klines(symbol, "1w", 26)
-        monthly = fetch_klines(symbol, "1M", 12)
     except Exception:
         return None
-    if not daily or len(daily) < 30:
+    if not klines or len(klines) < max(STYLE["ema_short"], 10):
         return None
 
-    current_price = float(daily[-1][4])
-    atr = calc_atr(daily, 30)
-    rsi = calc_rsi(daily, 14)
-    fib = calc_fibonacci(daily)
-    swings = find_swing_levels(daily)
-    patterns = detect_candle_patterns(daily)
-    trend_d = analyze_trend(daily)
+    current_price = float(klines[-1][4])
+    atr = calc_atr(klines)
+    rsi = calc_rsi(klines)
+    fib = calc_fibonacci(klines)
+    swings = find_swing_levels(klines)
+    patterns = detect_candle_patterns(klines)
+    trend_main = analyze_trend(klines)
+    # 日线和周线作为辅助趋势确认
+    trend_d = analyze_trend(daily) if daily and len(daily) >= 20 else "unknown"
     trend_w = analyze_trend(weekly) if weekly and len(weekly) >= 20 else "unknown"
-    trend_m = analyze_trend(monthly) if monthly and len(monthly) >= 10 else "unknown"
 
     if not atr or atr <= 0:
         return None
@@ -274,18 +363,18 @@ def analyze_symbol(symbol):
         buy_zone_high = fib["0.382"]
         buy_zone_low = fib["0.618"]
     else:
-        buy_zone_high = current_price * (1 - atr_pct)
-        buy_zone_low = current_price * (1 - atr_pct * 2)
+        buy_zone_high = current_price - atr * STYLE["tranche_spacing"]
+        buy_zone_low = current_price - atr * STYLE["tranche_spacing"] * 2
 
-    # 止损：斐波那契0.786下方 或 入场价-2×ATR（取较低者更安全）
+    # 止损：斐波那契0.786下方 或 买点下方-0.5×ATR
     if fib:
         stop = min(fib["0.786"], buy_zone_low - atr * 0.5)
     else:
         stop = buy_zone_low - atr * 0.5
 
-    # 止盈：基于ATR
-    tp1 = current_price + atr * 3
-    tp2 = current_price + atr * 5
+    # 止盈：由风格乘数决定
+    tp1 = current_price + atr * STYLE["tp1_atr_mult"]
+    tp2 = current_price + atr * STYLE["tp2_atr_mult"]
 
     # 分批买点
     tranche1 = round_price(buy_zone_high)
@@ -294,10 +383,7 @@ def analyze_symbol(symbol):
 
     # 趋势评分：多时间框架对齐
     trend_score = 0
-    if trend_m == "bull":
-        trend_score += 3
-    elif trend_m == "bull_weak":
-        trend_score += 1
+    # 周线权重最高（2分），日线次之（2分），主时间框架（2分）
     if trend_w == "bull":
         trend_score += 2
     elif trend_w == "bull_weak":
@@ -306,9 +392,14 @@ def analyze_symbol(symbol):
         trend_score += 2
     elif trend_d == "bull_weak":
         trend_score += 1
+    if trend_main == "bull":
+        trend_score += 2
+    elif trend_main == "bull_weak":
+        trend_score += 1
 
     # 是否适合建仓
     can_buy = (
+        trend_main not in ("bear",) and
         trend_d not in ("bear",) and
         trend_w not in ("bear",) and
         trend_score >= 2 and
@@ -322,7 +413,7 @@ def analyze_symbol(symbol):
         "atr": atr,
         "atr_pct": atr_pct,
         "rsi": rsi,
-        "trend": {"daily": trend_d, "weekly": trend_w, "monthly": trend_m},
+        "trend": {"main": trend_main, "daily": trend_d, "weekly": trend_w},
         "trend_score": trend_score,
         "fibonacci": fib,
         "swings": swings,
@@ -342,18 +433,20 @@ def analyze_symbol(symbol):
 
 
 def generate_dynamic_plan(symbol, current_price, name, logic=""):
-    """基于综合技术分析生成动态计划"""
+    """基于综合技术分析生成动态计划，所有参数由交易风格驱动"""
     analysis = analyze_symbol(symbol)
     if analysis:
         return {
             "name": name,
+            "style": STYLE_NAME,
             "tranches": analysis["tranches"],
             "stop": analysis["stop"],
             "tp1": analysis["tp1"],
             "tp2": analysis["tp2"],
-            "logic": "多时间框架分析：日线{} 周线{} 月线{}；ATR {:.4f}({:.2%})；RSI {:.1f}；斐波那契{}；裸K{}；{}".format(
-                analysis["trend"]["daily"], analysis["trend"]["weekly"], analysis["trend"]["monthly"],
-                analysis["atr"], analysis["atr_pct"], analysis["rsi"],
+            "logic": "[{}] 主框架{} 日线{} 周线{}；ATR {:.4f}({:.2%})；RSI {:.1f}；趋势评分{}；斐波那契{}；裸K{}；{}".format(
+                STYLE_NAME,
+                analysis["trend"]["main"], analysis["trend"]["daily"], analysis["trend"]["weekly"],
+                analysis["atr"], analysis["atr_pct"], analysis["rsi"], analysis["trend_score"],
                 "回调" + analysis["fibonacci"]["direction"] if analysis["fibonacci"] else "无",
                 "/".join(analysis["patterns"]) if analysis["patterns"] else "无明显形态",
                 logic),
@@ -363,21 +456,22 @@ def generate_dynamic_plan(symbol, current_price, name, logic=""):
         }
     # 降级：用简单ATR
     try:
-        klines = fetch_klines(symbol, "1d", 35)
-        atr = calc_atr(klines, 30) or current_price * 0.05
+        klines = fetch_klines(symbol, STYLE["kline_interval"], STYLE["atr_period"] + 5)
+        atr = calc_atr(klines) or current_price * 0.05
     except Exception:
         atr = current_price * 0.05
     return {
         "name": name,
+        "style": STYLE_NAME,
         "tranches": [
-            {"price": round_price(current_price - atr), "pct": 0.5},
-            {"price": round_price(current_price - atr * 1.5), "pct": 0.3},
-            {"price": round_price(current_price - atr * 2), "pct": 0.2},
+            {"price": round_price(current_price - atr * STYLE["tranche_spacing"]), "pct": 0.5},
+            {"price": round_price(current_price - atr * STYLE["tranche_spacing"] * 1.5), "pct": 0.3},
+            {"price": round_price(current_price - atr * STYLE["tranche_spacing"] * 2), "pct": 0.2},
         ],
-        "stop": round_price(current_price - atr * 2.5),
-        "tp1": round_price(current_price + atr * 3),
-        "tp2": round_price(current_price + atr * 5),
-        "logic": "降级ATR计划：" + logic,
+        "stop": round_price(current_price - atr * (STYLE["stop_atr_mult"] + 0.5)),
+        "tp1": round_price(current_price + atr * STYLE["tp1_atr_mult"]),
+        "tp2": round_price(current_price + atr * STYLE["tp2_atr_mult"]),
+        "logic": "[{}] 降级ATR计划：{}".format(STYLE_NAME, logic),
         "start_date": dt.date.today().isoformat(),
         "atr": atr,
         "trend_score": 0,
@@ -409,12 +503,13 @@ def screen_new_crypto_candidate(exclude_symbols):
                 continue
             candidates.append({"symbol": sym, "pct24": pct, "price": price, "vol": vol})
         candidates.sort(key=lambda x: x["pct24"], reverse=True)
-        # 取前10名计算动量
+        # 取前10名做综合分析
         for c in candidates[:10]:
-            mom = calc_momentum(c["symbol"])
-            if mom["pct_15d"] >= MOMENTUM_15D_MIN or mom["pct_30d"] >= MOMENTUM_30D_MIN:
-                c["pct_15d"] = mom["pct_15d"]
-                c["pct_30d"] = mom["pct_30d"]
+            analysis = analyze_symbol(c["symbol"])
+            if analysis and analysis["trend_score"] >= 2:
+                c["trend_score"] = analysis["trend_score"]
+                c["atr_pct"] = analysis["atr_pct"]
+                c["rsi"] = analysis["rsi"]
                 return c
         return None
     except Exception:
@@ -748,10 +843,9 @@ class CryptoTracker:
                                         analysis["rsi"], days)})
                             continue
                     else:
-                        # 分析失败，退回动量筛选
+                        # 分析失败，退回简单动量筛选
                         mom = calc_momentum(symbol)
-                        has_momentum = (mom["pct_15d"] >= MOMENTUM_15D_MIN or
-                                        mom["pct_30d"] >= MOMENTUM_30D_MIN)
+                        has_momentum = (mom["pct_15d"] >= 0.03 or mom["pct_30d"] >= 0.06)
                         if has_momentum:
                             if not self.state.get("rescreened", {}).get(symbol):
                                 new_plan = generate_dynamic_plan(
