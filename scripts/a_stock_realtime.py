@@ -23,18 +23,89 @@ SIM_STATE_FILE = os.path.join(PLAN_DIR, "state.json")
 SIM_REPORT_FILE = os.path.join(PLAN_DIR, "report.md")
 SIM_REPORT_ARCHIVE_DIR = os.path.join(BASE_DIR, "stock_reports")
 SIM_CAPITAL = float(PLAN_CONFIG["capital"])
-SIM_DAYS = int(PLAN_CONFIG["valid_days"])
 PLAN_ID = PLAN_CONFIG["plan_id"]
 PLAN_DATE = PLAN_CONFIG["plan_date"]
 PUSHPLUS_TOKEN = "e39674189a874c48888292f80e0c3464"
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
 SIM_PLANS = PLAN_CONFIG["plans"]
 
+# ====== A股交易风格驱动体系 ======
+# 适配T+1、涨跌停10%、每日4小时交易时间
+
+STOCK_STYLE_PROFILES = {
+    "超短线": {
+        "desc": "1-3天，抓短线爆发",
+        "atr_period": 10,           # 10天ATR
+        "ema_short": 5,              # 5日EMA
+        "ema_long": 10,              # 10日EMA
+        "rsi_period": 6,             # 6日RSI
+        "fib_lookback": 20,          # 20天高低点
+        "stop_atr_mult": 1.0,        # 止损=1×ATR（A股有涨跌停限制，波动相对小）
+        "tp1_atr_mult": 1.5,         # 止盈1=1.5×ATR
+        "tp2_atr_mult": 2.5,         # 止盈2=2.5×ATR
+        "valid_days": 5,             # 1周
+        "tranche_spacing": 0.3,      # 批次间距=0.3×ATR
+        "poll_ms": 30000,            # 30秒轮询
+    },
+    "短线": {
+        "desc": "1-2周，波段交易",
+        "atr_period": 14,
+        "ema_short": 5,
+        "ema_long": 20,
+        "rsi_period": 14,
+        "fib_lookback": 30,
+        "stop_atr_mult": 1.5,
+        "tp1_atr_mult": 2.0,
+        "tp2_atr_mult": 3.5,
+        "valid_days": 14,
+        "tranche_spacing": 0.5,
+        "poll_ms": 60000,
+    },
+    "中线": {
+        "desc": "1-3月，趋势跟踪",
+        "atr_period": 20,
+        "ema_short": 10,
+        "ema_long": 30,
+        "rsi_period": 14,
+        "fib_lookback": 60,
+        "stop_atr_mult": 2.0,
+        "tp1_atr_mult": 3.0,
+        "tp2_atr_mult": 5.0,
+        "valid_days": 90,
+        "tranche_spacing": 1.0,
+        "poll_ms": 120000,
+    },
+    "长线": {
+        "desc": "3-12月，长周期布局",
+        "atr_period": 30,
+        "ema_short": 20,
+        "ema_long": 60,
+        "rsi_period": 14,
+        "fib_lookback": 120,
+        "stop_atr_mult": 3.0,
+        "tp1_atr_mult": 5.0,
+        "tp2_atr_mult": 8.0,
+        "valid_days": 365,
+        "tranche_spacing": 1.5,
+        "poll_ms": 300000,
+    },
+}
+
+
+def get_stock_style():
+    style = PLAN_CONFIG.get("style", "短线")
+    return STOCK_STYLE_PROFILES.get(style, STOCK_STYLE_PROFILES["短线"]), style
+
+
+STOCK_STYLE, STOCK_STYLE_NAME = get_stock_style()
+SIM_POLL_MS = STOCK_STYLE["poll_ms"]
+SIM_DAYS = STOCK_STYLE["valid_days"]
+
 # 动态调整参数
 COOLDOWN_HOURS = 48          # 止损清仓后冷却小时数
-TRAILING_TP_PCT = 0.08       # 止盈1后追踪止盈回撤比例
-OPPORTUNITY_THRESHOLD = 0.10 # 未建仓但远离买点上限10%触发机会提示
-EXTENDED_OBSERVATION_DAYS = 5  # 到期后持续观察天数
+TRAILING_TP_PCT = 0.04 + STOCK_STYLE["stop_atr_mult"] * 0.02
+OPPORTUNITY_THRESHOLD = 0.10
+EXTENDED_OBSERVATION_DAYS = 5
 
 # 动态替换候选池（流动性好的大盘股）
 STOCK_CANDIDATE_POOL = {
@@ -65,6 +136,142 @@ def fetch_stock_klines(code, scale="240", count=30):
     return json.loads(text[start:end + 1])
 
 
+# ====== A股多时间框架技术分析 ======
+
+def calc_stock_ema(closes, period):
+    if len(closes) < period:
+        return None
+    k = 2 / (period + 1)
+    ema = closes[0]
+    for c in closes[1:]:
+        ema = c * k + ema * (1 - k)
+    return ema
+
+
+def calc_stock_atr(klines, period=None):
+    if period is None:
+        period = STOCK_STYLE["atr_period"]
+    if len(klines) < period + 1:
+        period = len(klines) - 1
+    if period < 3:
+        return None
+    trs = []
+    for i in range(1, len(klines)):
+        k = klines[i]
+        prev_close = float(klines[i - 1]["close"])
+        high = float(k["high"])
+        low = float(k["low"])
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        trs.append(tr)
+    return sum(trs[-period:]) / period
+
+
+def calc_stock_rsi(klines, period=None):
+    if period is None:
+        period = STOCK_STYLE["rsi_period"]
+    closes = [float(k["close"]) for k in klines]
+    if len(closes) < period + 1:
+        return 50.0
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        change = closes[i] - closes[i - 1]
+        gains.append(max(change, 0))
+        losses.append(max(-change, 0))
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def calc_stock_fibonacci(klines, lookback=None):
+    if lookback is None:
+        lookback = STOCK_STYLE["fib_lookback"]
+    n = min(lookback, len(klines))
+    highs = [float(k["high"]) for k in klines[-n:]]
+    lows = [float(k["low"]) for k in klines[-n:]]
+    recent_high = max(highs)
+    recent_low = min(lows)
+    high_idx = n - 1 - highs[::-1].index(recent_high)
+    low_idx = n - 1 - lows[::-1].index(recent_low)
+    diff = recent_high - recent_low
+    if diff <= 0:
+        return None
+    direction = "up" if high_idx > low_idx else "down"
+    if direction == "up":
+        return {
+            "direction": "up", "high": recent_high, "low": recent_low,
+            "0.236": recent_high - diff * 0.236,
+            "0.382": recent_high - diff * 0.382,
+            "0.5": recent_high - diff * 0.5,
+            "0.618": recent_high - diff * 0.618,
+            "0.786": recent_high - diff * 0.786,
+        }
+    else:
+        return {
+            "direction": "down", "high": recent_high, "low": recent_low,
+            "0.236": recent_low + diff * 0.236,
+            "0.382": recent_low + diff * 0.382,
+            "0.5": recent_low + diff * 0.5,
+            "0.618": recent_low + diff * 0.618,
+            "0.786": recent_low + diff * 0.786,
+        }
+
+
+def detect_stock_candle_patterns(klines):
+    if len(klines) < 3:
+        return []
+    patterns = []
+    k = klines[-1]
+    prev = klines[-2]
+    o = float(k["open"])
+    h = float(k["high"])
+    l = float(k["low"])
+    c = float(k["close"])
+    po = float(prev["open"])
+    pc = float(prev["close"])
+    body = abs(o - c)
+    upper_wick = h - max(o, c)
+    lower_wick = min(o, c) - l
+    range_total = h - l
+    if range_total <= 0:
+        return []
+    if lower_wick > body * 2 and lower_wick > upper_wick * 2:
+        patterns.append("看涨Pin bar")
+    if upper_wick > body * 2 and upper_wick > lower_wick * 2:
+        patterns.append("看跌Pin bar")
+    if c > po and o < pc and c > o and pc < po:
+        patterns.append("看涨吞没")
+    if c < po and o > pc and c < o and pc > po:
+        patterns.append("看跌吞没")
+    if lower_wick > body * 2 and upper_wick < body * 0.5:
+        patterns.append("锤子线")
+    if upper_wick > body * 2 and lower_wick < body * 0.5:
+        patterns.append("射击之星")
+    return patterns
+
+
+def analyze_stock_trend(klines):
+    closes = [float(k["close"]) for k in klines]
+    es, el = STOCK_STYLE["ema_short"], STOCK_STYLE["ema_long"]
+    if len(closes) < es:
+        return "unknown"
+    ema_short = calc_stock_ema(closes, es)
+    current = closes[-1]
+    if not ema_short:
+        return "unknown"
+    if len(closes) >= el:
+        ema_long = calc_stock_ema(closes, el)
+        if ema_long and ema_short > ema_long and current > ema_short:
+            return "bull"
+        if ema_long and ema_short < ema_long and current < ema_short:
+            return "bear"
+    if current > ema_short:
+        return "bull_weak"
+    return "range"
+
+
 def calc_stock_momentum(code):
     """计算15天和30天动量"""
     try:
@@ -78,16 +285,126 @@ def calc_stock_momentum(code):
         return {"pct_15d": 0.0, "pct_30d": 0.0}
 
 
+def analyze_stock(code):
+    """综合多时间框架技术分析，所有参数由交易风格驱动"""
+    try:
+        count = max(STOCK_STYLE["fib_lookback"], STOCK_STYLE["ema_long"] + STOCK_STYLE["atr_period"] + 10)
+        klines = fetch_stock_klines(code, "240", count)
+    except Exception:
+        return None
+    if not klines or len(klines) < max(STOCK_STYLE["ema_short"], 10):
+        return None
+
+    current_price = float(klines[-1]["close"])
+    atr = calc_stock_atr(klines)
+    rsi = calc_stock_rsi(klines)
+    fib = calc_stock_fibonacci(klines)
+    patterns = detect_stock_candle_patterns(klines)
+    trend_d = analyze_stock_trend(klines)
+    # 周线辅助：取日线5倍数据模拟周线
+    weekly_klines = klines[::5] if len(klines) >= 25 else []
+    trend_w = analyze_stock_trend(weekly_klines) if weekly_klines and len(weekly_klines) >= 10 else "unknown"
+
+    if not atr or atr <= 0:
+        return None
+
+    atr_pct = atr / current_price
+
+    # 买点：斐波那契0.382-0.618回调区间
+    if fib and fib["direction"] == "up":
+        buy_zone_high = fib["0.382"]
+        buy_zone_low = fib["0.618"]
+    else:
+        buy_zone_high = current_price - atr * STOCK_STYLE["tranche_spacing"]
+        buy_zone_low = current_price - atr * STOCK_STYLE["tranche_spacing"] * 2
+
+    # 止损
+    if fib:
+        stop = min(fib["0.786"], buy_zone_low - atr * 0.3)
+    else:
+        stop = buy_zone_low - atr * 0.3
+
+    # 止盈
+    tp1 = current_price + atr * STOCK_STYLE["tp1_atr_mult"]
+    tp2 = current_price + atr * STOCK_STYLE["tp2_atr_mult"]
+
+    # 趋势评分
+    trend_score = 0
+    if trend_w == "bull":
+        trend_score += 2
+    elif trend_w == "bull_weak":
+        trend_score += 1
+    if trend_d == "bull":
+        trend_score += 2
+    elif trend_d == "bull_weak":
+        trend_score += 1
+
+    can_buy = (
+        trend_d not in ("bear",) and
+        trend_w not in ("bear",) and
+        trend_score >= 2 and
+        rsi < 65
+    )
+
+    return {
+        "current_price": current_price,
+        "atr": atr,
+        "atr_pct": atr_pct,
+        "rsi": rsi,
+        "trend": {"daily": trend_d, "weekly": trend_w},
+        "trend_score": trend_score,
+        "fibonacci": fib,
+        "patterns": patterns,
+        "can_buy": can_buy,
+        "buy_zone": {"high": buy_zone_high, "low": buy_zone_low},
+        "buy_low": round(buy_zone_low, 2),
+        "buy_high": round(buy_zone_high, 2),
+        "stop": round(stop, 2),
+        "tp1": round(tp1, 2),
+        "tp2": round(tp2, 2),
+    }
+
+
 def generate_dynamic_stock_plan(code, current_price, name):
-    """基于当前价格生成动态计划"""
+    """基于综合技术分析生成动态计划"""
+    analysis = analyze_stock(code)
+    if analysis:
+        return {
+            "name": name,
+            "style": STOCK_STYLE_NAME,
+            "buy_low": analysis["buy_low"],
+            "buy_high": analysis["buy_high"],
+            "stop": analysis["stop"],
+            "tp1": analysis["tp1"],
+            "tp2": analysis["tp2"],
+            "logic": "[{}] 日线{} 周线{}；ATR {:.2f}({:.2%})；RSI {:.1f}；趋势评分{}；斐波那契{}；裸K{}".format(
+                STOCK_STYLE_NAME,
+                analysis["trend"]["daily"], analysis["trend"]["weekly"],
+                analysis["atr"], analysis["atr_pct"], analysis["rsi"], analysis["trend_score"],
+                "回调" + analysis["fibonacci"]["direction"] if analysis["fibonacci"] else "无",
+                "/".join(analysis["patterns"]) if analysis["patterns"] else "无明显形态"),
+            "start_date": dt.date.today().isoformat(),
+            "atr": analysis["atr"],
+            "trend_score": analysis["trend_score"],
+        }
+    # 降级
+    try:
+        klines = fetch_stock_klines(code, "240", STOCK_STYLE["atr_period"] + 5)
+        atr = calc_stock_atr(klines) or current_price * 0.05
+    except Exception:
+        atr = current_price * 0.05
     return {
         "name": name,
-        "buy_low": round(current_price * 0.97, 2),
-        "buy_high": round(current_price * 0.99, 2),
-        "stop": round(current_price * 0.91, 2),
-        "tp1": round(current_price * 1.08, 2),
-        "tp2": round(current_price * 1.15, 2),
+        "style": STOCK_STYLE_NAME,
+        "buy_low": round(current_price - atr * STOCK_STYLE["tranche_spacing"] * 2, 2),
+        "buy_high": round(current_price - atr * STOCK_STYLE["tranche_spacing"], 2),
+        "stop": round(current_price - atr * (STOCK_STYLE["stop_atr_mult"] + 0.3), 2),
+        "tp1": round(current_price + atr * STOCK_STYLE["tp1_atr_mult"], 2),
+        "tp2": round(current_price + atr * STOCK_STYLE["tp2_atr_mult"], 2),
+        "logic": "[{}] 降级ATR计划".format(STOCK_STYLE_NAME),
         "start_date": dt.date.today().isoformat(),
+        "atr": atr,
+        "trend_score": 0,
     }
 
 
@@ -108,15 +425,17 @@ def screen_new_stock_candidate(exclude_codes):
         price = quote["current"]
         if price <= 0:
             continue
-        mom = calc_stock_momentum(code)
-        if mom["pct_15d"] >= 0.05 or mom["pct_30d"] >= 0.10:
+        analysis = analyze_stock(code)
+        if analysis and analysis["trend_score"] >= 2:
             candidates.append({
                 "code": code, "name": name, "price": price,
-                "pct_15d": mom["pct_15d"], "pct_30d": mom["pct_30d"],
+                "trend_score": analysis["trend_score"],
+                "atr_pct": analysis["atr_pct"],
+                "rsi": analysis["rsi"],
             })
     if not candidates:
         return None
-    candidates.sort(key=lambda x: x["pct_15d"], reverse=True)
+    candidates.sort(key=lambda x: x["trend_score"], reverse=True)
     return candidates[0]
 
 
@@ -247,10 +566,10 @@ class SimulationTracker:
             replacements[expired_code] = candidate["code"]
             alerts.append({
                 "code": candidate["code"], "kind": "replace", "price": candidate["price"],
-                "text": "替换 {}：新增 {}，当前价 {:.2f}，15d动量 {:+.2%}，30d动量 {:+.2%}，"
+                "text": "替换 {}：新增 {}，当前价 {:.2f}，趋势评分{}，ATR {:.2%}，RSI {:.1f}，"
                         "买点 {:.2f}-{:.2f}，止损 {:.2f}，止盈 {:.2f}/{:.2f}".format(
                     expired_name, candidate["name"], candidate["price"],
-                    candidate["pct_15d"], candidate["pct_30d"],
+                    candidate["trend_score"], candidate["atr_pct"], candidate["rsi"],
                     new_plan["buy_low"], new_plan["buy_high"],
                     new_plan["stop"], new_plan["tp1"], new_plan["tp2"])
             })
@@ -394,26 +713,27 @@ class SimulationTracker:
                     start_dt = dt.date.fromisoformat(start_date)
                     days = (dt.date.today() - start_dt).days
                     if days >= SIM_DAYS:
-                        mom = calc_stock_momentum(code)
-                        has_momentum = mom["pct_15d"] >= 0.05 or mom["pct_30d"] >= 0.10
-
-                        if has_momentum:
+                        analysis = analyze_stock(code)
+                        if analysis and analysis["can_buy"]:
                             if not self.state.get("rescreened", {}).get(code):
                                 new_plan = generate_dynamic_stock_plan(code, price, plan["name"])
                                 self.state.setdefault("dynamic_plans", {})[code] = new_plan
                                 self.state.setdefault("rescreened", {})[code] = True
                                 ep = new_plan
                                 alerts.append({"code": code, "kind": "rescreen", "price": price,
-                                               "text": "计划到期重新筛选：15d动量 {:.2%}，30d动量 {:.2%}，已生成新买点 {:.2f}-{:.2f}，止损 {:.2f}，止盈 {:.2f}/{:.2f}".format(
-                                                   mom["pct_15d"], mom["pct_30d"],
+                                               "text": "到期重新分析：日线{} 周线{}；ATR {:.2f}({:.2%})；RSI {:.1f}；趋势评分{}；已生成新买点 {:.2f}-{:.2f}，止损 {:.2f}，止盈 {:.2f}/{:.2f}".format(
+                                                   analysis["trend"]["daily"], analysis["trend"]["weekly"],
+                                                   analysis["atr"], analysis["atr_pct"], analysis["rsi"],
+                                                   analysis["trend_score"],
                                                    ep["buy_low"], ep["buy_high"], ep["stop"],
                                                    ep["tp1"], ep["tp2"])})
-                        else:
+                        elif analysis and not analysis["can_buy"]:
                             if days >= SIM_DAYS + EXTENDED_OBSERVATION_DAYS:
                                 alerts.append({"code": code, "kind": "expire", "price": price,
-                                               "text": "计划到期后持续观察 {} 天仍无行情（15d {:.2%}，30d {:.2%}），移出本期".format(
+                                               "text": "到期后持续观察 {} 天，趋势评分{}（日线{} 周线{}），不适合建仓，移出本期".format(
                                                    EXTENDED_OBSERVATION_DAYS,
-                                                   mom["pct_15d"], mom["pct_30d"])})
+                                                   analysis["trend_score"],
+                                                   analysis["trend"]["daily"], analysis["trend"]["weekly"])})
                                 self.state.setdefault("plan_expired", {})[code] = True
                                 self.try_replacement(code, plan["name"], alerts)
                                 continue
@@ -423,8 +743,27 @@ class SimulationTracker:
                                 if self.state.get("opportunity_pushed", {}).get(observe_key) != today_str:
                                     self.state.setdefault("opportunity_pushed", {})[observe_key] = today_str
                                     alerts.append({"code": code, "kind": "rescreen", "price": price,
-                                                   "text": "计划到期但暂无行情（15d {:.2%}，30d {:.2%}），持续观察中（第 {} 天）".format(
-                                                       mom["pct_15d"], mom["pct_30d"], days)})
+                                                   "text": "到期但暂不适合建仓（趋势评分{}，日线{} 周线{} RSI {:.1f}），持续观察中（第 {} 天）".format(
+                                                       analysis["trend_score"],
+                                                       analysis["trend"]["daily"], analysis["trend"]["weekly"],
+                                                       analysis["rsi"], days)})
+                                continue
+                        else:
+                            mom = calc_stock_momentum(code)
+                            has_momentum = mom["pct_15d"] >= 0.03 or mom["pct_30d"] >= 0.06
+                            if has_momentum:
+                                if not self.state.get("rescreened", {}).get(code):
+                                    new_plan = generate_dynamic_stock_plan(code, price, plan["name"])
+                                    self.state.setdefault("dynamic_plans", {})[code] = new_plan
+                                    self.state.setdefault("rescreened", {})[code] = True
+                                    ep = new_plan
+                            else:
+                                if days >= SIM_DAYS + EXTENDED_OBSERVATION_DAYS:
+                                    alerts.append({"code": code, "kind": "expire", "price": price,
+                                                   "text": "到期后持续观察 {} 天仍无行情，移出本期".format(EXTENDED_OBSERVATION_DAYS)})
+                                    self.state.setdefault("plan_expired", {})[code] = True
+                                    self.try_replacement(code, plan["name"], alerts)
+                                    continue
                                 continue
 
                 if self.state.get("plan_expired", {}).get(code):
@@ -435,32 +774,46 @@ class SimulationTracker:
                     today_str = now.date().isoformat()
                     opp_key = code + "_opp"
                     if self.state.get("opportunity_pushed", {}).get(opp_key) != today_str:
-                        mom = calc_stock_momentum(code)
-                        if mom["pct_15d"] >= 0.05:
+                        analysis = analyze_stock(code)
+                        if analysis and analysis["trend_score"] >= 2:
                             self.state.setdefault("opportunity_pushed", {})[opp_key] = today_str
                             alerts.append({"code": code, "kind": "opportunity", "price": price,
-                                           "text": "价格 {:.2f} 已远离买点 {:.2f}（+{:.1f}%），15d动量 {:.2%}，关注回踩机会".format(
+                                           "text": "价格 {:.2f} 已远离买点 {:.2f}（+{:.1f}%），趋势评分{}（日线{} 周线{}），RSI {:.1f}，关注回踩机会".format(
                                                price, ep["buy_high"], (price / ep["buy_high"] - 1) * 100,
-                                               mom["pct_15d"])})
+                                               analysis["trend_score"],
+                                               analysis["trend"]["daily"], analysis["trend"]["weekly"],
+                                               analysis["rsi"])})
 
-                # 买入区间内建仓
+                # 买入区间内建仓（仅当趋势允许时）
                 if ep["buy_low"] <= price <= ep["buy_high"]:
-                    budget = SIM_CAPITAL / len(SIM_PLANS)
-                    shares = int(budget // price // 100) * 100
-                    if shares:
-                        cost = shares * price
-                        self.state["cash"] -= cost
-                        self.state["positions"][code] = {
-                            "shares": shares,
-                            "buy_price": price,
-                            "buy_date": today,
-                            "tp1_done": False,
-                        }
-                        action = "买入 {} {} 股，成交价 {:.2f} 元".format(ep["name"], shares, price)
-                        self.record(action, code=code, action="buy", price=price, shares=shares,
-                                    value=cost, plan_version=self.state.get("plan_id", PLAN_ID))
-                        day_log["actions"].append(action)
-                        alerts.append({"code": code, "kind": "buy", "price": price, "text": action})
+                    analysis = analyze_stock(code)
+                    if analysis and analysis["can_buy"]:
+                        budget = SIM_CAPITAL / len(SIM_PLANS)
+                        shares = int(budget // price // 100) * 100
+                        if shares:
+                            cost = shares * price
+                            self.state["cash"] -= cost
+                            self.state["positions"][code] = {
+                                "shares": shares,
+                                "buy_price": price,
+                                "buy_date": today,
+                                "tp1_done": False,
+                            }
+                            action = "买入 {} {} 股，成交价 {:.2f} 元".format(ep["name"], shares, price)
+                            self.record(action, code=code, action="buy", price=price, shares=shares,
+                                        value=cost, plan_version=self.state.get("plan_id", PLAN_ID))
+                            day_log["actions"].append(action)
+                            alerts.append({"code": code, "kind": "buy", "price": price, "text": action})
+                    elif analysis:
+                        today_str = now.date().isoformat()
+                        block_key = code + "_block"
+                        if self.state.get("opportunity_pushed", {}).get(block_key) != today_str:
+                            self.state.setdefault("opportunity_pushed", {})[block_key] = today_str
+                            alerts.append({"code": code, "kind": "opportunity", "price": price,
+                                           "text": "价格在买点区间但趋势不允许建仓（评分{}，日线{} 周线{}，RSI {:.1f}），等待趋势确认".format(
+                                               analysis["trend_score"],
+                                               analysis["trend"]["daily"], analysis["trend"]["weekly"],
+                                               analysis["rsi"])})
         day_log["quotes"] = quotes
         day_log["cash"] = self.state["cash"]
         day_log["asset"] = self.calculate_asset(quotes)
