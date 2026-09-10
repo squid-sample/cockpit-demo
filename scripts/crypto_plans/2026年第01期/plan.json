@@ -2,7 +2,6 @@
   "plan_id": "2026年第01期",
   "plan_date": "2026-09-07",
   "style": "短线",
-  "valid_days": 10,
   "capital": 100000.0,
   "plans": {
     "LINKUSDT": {
