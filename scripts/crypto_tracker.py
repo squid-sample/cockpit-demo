@@ -325,6 +325,12 @@ class CryptoTracker:
         "expire": ("计划到期未建仓", "#6b7280"),
     }
 
+    def closed_trade_records(self):
+        return [
+            trade for trade in self.state.get("trades", [])
+            if trade.get("action") == "sell" and "清仓" in trade.get("reason", "")
+        ]
+
     def push_scheduled_summary(self, quotes):
         now = dt.datetime.now()
         slots = ((dt.time(9, 0), "morning", "早间"), (dt.time(17, 50), "evening", "晚间"))
@@ -339,12 +345,12 @@ class CryptoTracker:
             parts = [
                 "<div style='font-family:Microsoft YaHei,Arial;font-size:14px;line-height:1.7'>",
                 "<h3>{}加密货币持仓汇总 · {}</h3>".format(label, now.strftime("%Y-%m-%d %H:%M")),
-                "<p>计划期：{}；剩余可用资金：{:.2f} USDT；已投入资产：{:.2f} USDT；持仓市值：{:.2f} USDT；总资产：{:.2f} USDT；浮动盈亏：<b>{:+.2f} USDT</b></p>".format(
+                "<p>计划期：{}；剩余可用资金：<b>{:.2f} USDT</b>；累计投入资产：{:.2f} USDT；当前持仓市值：{:.2f} USDT；总资产：{:.2f} USDT；账户浮动盈亏：<b>{:+.2f} USDT</b></p>".format(
                     self.state.get("plan_id", PLAN_ID), self.state["cash"], invested, market_value, total,
                     total - SIM_CAPITAL),
             ]
             if self.state["positions"]:
-                parts.append("<p><b>当前持仓</b></p><table style='border-collapse:collapse'><tr><th>币种</th><th>数量</th><th>买入总金额</th><th>平均买入价</th><th>当前价格</th><th>当前市值</th><th>浮动盈亏</th><th>收益率</th></tr>")
+                parts.append("<p><b>当前持仓</b></p><table style='border-collapse:collapse'><tr><th>币种</th><th>累计投入（USDT）</th><th>平均买入价</th><th>当前价格</th><th>当前市值（USDT）</th><th>浮动盈亏</th><th>收益率</th></tr>")
                 for symbol, pos in self.state["positions"].items():
                     avg = pos["cost"] / pos["amount"] if pos["amount"] else 0
                     price = quotes.get(symbol, {}).get("price", avg)
@@ -352,11 +358,22 @@ class CryptoTracker:
                     pnl = value - pos["cost"]
                     pnl_pct = pnl / pos["cost"] * 100 if pos["cost"] else 0
                     plan = PLANS[symbol]
-                    parts.append("<tr><td>{}</td><td>{:.6f} 枚</td><td>{:.2f} USDT</td><td>{:.4f}</td><td>{:.4f}</td><td>{:.2f} USDT</td><td><b>{:+.2f} USDT</b></td><td>{:+.2f}%</td></tr>".format(
-                        plan["name"], pos["amount"], pos["cost"], avg, price, value, pnl, pnl_pct))
+                    parts.append("<tr><td>{}</td><td>{:.2f}</td><td>{:.4f}</td><td>{:.4f}</td><td>{:.2f}</td><td><b>{:+.2f} USDT</b></td><td>{:+.2f}%</td></tr>".format(
+                        plan["name"], pos["cost"], avg, price, value, pnl, pnl_pct))
                 parts.append("</table>")
             else:
-                parts.append("<p>当前无持仓，已投入资产：0.00 USDT。</p>")
+                parts.append("<p>当前无持仓，当前持仓投入：0.00 USDT。</p>")
+            closed = self.closed_trade_records()
+            if closed:
+                parts.append("<p><b>已清仓记录（已实现盈亏）</b></p><table style='border-collapse:collapse'><tr><th>时间</th><th>币种</th><th>卖出数量（枚）</th><th>卖出金额（USDT）</th><th>投入成本（USDT）</th><th>已实现浮盈/浮亏</th></tr>")
+                for trade in closed[-20:]:
+                    cost = trade.get("cost", trade.get("value", 0) - trade.get("pnl", 0))
+                    parts.append("<tr><td>{}</td><td>{}</td><td>{:.6f}</td><td>{:.2f}</td><td>{:.2f}</td><td><b>{:+.2f} USDT</b></td></tr>".format(
+                        trade.get("time", "-"), PLANS.get(trade.get("symbol"), {}).get("name", trade.get("symbol", "-")),
+                        trade.get("amount", 0), trade.get("value", 0), cost, trade.get("pnl", 0)))
+                parts.append("</table>")
+            else:
+                parts.append("<p>暂无已清仓记录。</p>")
             parts.append("<p><b>后续计划</b>：按本期 plan.json 的分批买点执行；未持仓标的等待回踩买点，持仓标的按止损/止盈规则处理。</p>")
             parts.append("<p style='color:#aaa;font-size:12px'>仅为程序模拟，不会真实下单。</p></div>")
             push_async("币·{}持仓汇总".format(label), "".join(parts))
@@ -455,8 +472,11 @@ class CryptoTracker:
             "- 开始跟踪日期：{}（计划有效期 {} 天，到期未建仓自动暂停）".format(
                 self.state["start_date"], PLAN_VALID_DAYS),
             "- 模拟资金：{:.0f} USDT（每币分配约 {:.0f}）".format(SIM_CAPITAL, SIM_CAPITAL / len(PLANS)),
+            "- 剩余可用资金：{:.2f} USDT".format(self.state["cash"]),
+            "- 当前持仓投入：{:.2f} USDT".format(sum(pos["cost"] for pos in self.state["positions"].values())),
+            "- 当前持仓市值：{:.2f} USDT".format(self.total_asset(quotes) - self.state["cash"]),
             "- 当前总资产：{:.2f} USDT".format(self.total_asset(quotes)),
-            "- 浮动盈亏：{:+.2f} USDT（{:+.2f}%）".format(
+            "- 总浮动盈亏：{:+.2f} USDT（{:+.2f}%）".format(
                 self.total_asset(quotes) - SIM_CAPITAL,
                 (self.total_asset(quotes) - SIM_CAPITAL) / SIM_CAPITAL * 100),
             "",
