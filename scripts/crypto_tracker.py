@@ -19,6 +19,7 @@ with open(os.path.join(PLAN_DIR, "plan.json"), "r", encoding="utf-8") as f:
 STATE_FILE = os.path.join(PLAN_DIR, "state.json")
 REPORT_FILE = os.path.join(PLAN_DIR, "report.md")
 REPORT_ARCHIVE_DIR = os.path.join(BASE_DIR, "crypto_reports")
+REVIEW_DIR = os.path.join(BASE_DIR, "crypto_reviews")
 SIM_CAPITAL = float(PLAN_CONFIG["capital"])
 PUSHPLUS_TOKEN = "e39674189a874c48888292f80e0c3464"
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
@@ -572,6 +573,7 @@ class CryptoTracker:
                 state.setdefault("opportunity_pushed", {})
                 state.setdefault("rescreened", {})
                 state.setdefault("replacements", {})
+                state.setdefault("review_pushed", {})
                 return state
             except (OSError, ValueError):
                 pass
@@ -591,6 +593,7 @@ class CryptoTracker:
             "opportunity_pushed": {},
             "rescreened": {},
             "replacements": {},
+            "review_pushed": {},
         }
 
     def save_state(self):
@@ -667,6 +670,204 @@ class CryptoTracker:
                     sum(t.get("pnl", 0) < 0 for t in items),
                     sum(t.get("pnl", 0) for t in items)))
         return lines
+
+    def check_monthly_review(self):
+        """每月15号和30号自动生成复盘报告"""
+        now = dt.datetime.now()
+        day = now.day
+        # 判断是否复盘日：15号、30号、或短月最后一天（>=28号且次日为下月1号）
+        if day == 15:
+            marker = now.strftime("%Y-%m-15")
+            start_day, end_day = 1, 15
+        elif day == 30:
+            marker = now.strftime("%Y-%m-30")
+            start_day, end_day = 16, 30
+        else:
+            tomorrow = (now + dt.timedelta(days=1)).date()
+            if tomorrow.day == 1 and day >= 28:
+                marker = now.strftime("%Y-%m-EOM")
+                start_day, end_day = 16, day
+            else:
+                return
+        if self.state.get("review_pushed", {}).get(marker):
+            return
+        year, month = now.year, now.month
+        start = dt.date(year, month, start_day).isoformat()
+        end = dt.date(year, month, end_day).isoformat()
+        self.generate_review_report(start, end, marker)
+        self.state.setdefault("review_pushed", {})[marker] = now.strftime("%Y-%m-%d %H:%M")
+        self.save_state()
+
+    def generate_review_report(self, start, end, marker):
+        """生成策略复盘报告并写入独立文件"""
+        # 收集区间内卖出记录
+        sells = []
+        for trade in self.state.get("trades", []):
+            if trade.get("action") != "sell":
+                continue
+            day = trade.get("time", "")[:10]
+            if start <= day <= end:
+                sells.append(trade)
+        wins = [t for t in sells if t.get("pnl", 0) > 0]
+        losses = [t for t in sells if t.get("pnl", 0) < 0]
+        profit = sum(t.get("pnl", 0) for t in wins)
+        loss = sum(t.get("pnl", 0) for t in losses)
+        total_pnl = sum(t.get("pnl", 0) for t in sells)
+        win_rate = len(wins) / len(sells) * 100 if sells else 0
+        avg_win = profit / len(wins) if wins else 0
+        avg_loss = loss / len(losses) if losses else 0
+        pl_ratio = profit / abs(loss) if loss else 0
+
+        # 当前持仓浮动盈亏
+        quotes = self.state.get("last_quotes", {})
+        open_positions = []
+        for symbol, pos in self.state.get("positions", {}).items():
+            price = quotes.get(symbol, {}).get("price", pos["cost"] / pos["amount"] if pos["amount"] else 0)
+            value = pos["amount"] * price
+            pnl = value - pos["cost"]
+            open_positions.append({
+                "name": self.effective_plan(symbol)["name"],
+                "pnl": pnl,
+                "pct": pnl / pos["cost"] * 100 if pos["cost"] else 0,
+                "cost": pos["cost"], "value": value})
+
+        # 机会提示次数（未建仓但大涨）
+        opportunity_count = sum(1 for t in self.state.get("trades", [])
+                                if t.get("action") == "opportunity"
+                                and start <= t.get("time", "")[:10] <= end)
+        # 计划到期/移除次数
+        expired = sum(1 for t in self.state.get("trades", [])
+                      if t.get("action") == "expire"
+                      and start <= t.get("time", "")[:10] <= end)
+        # 止损清仓次数
+        stop_count = sum(1 for t in sells if "止损" in t.get("reason", "") or t.get("kind") == "stop")
+        # 止盈清仓次数
+        tp2_count = sum(1 for t in sells if "止盈" in t.get("reason", "") or t.get("kind") == "tp2")
+
+        now = dt.datetime.now()
+        lines = [
+            "# 加密货币策略复盘报告 · {}".format(now.strftime("%Y-%m-%d")),
+            "",
+            "> 复盘区间：{} 至 {}".format(start, end),
+            "> 计划期：{}".format(self.state.get("plan_id", PLAN_ID)),
+            "> 生成时间：{}".format(now.strftime("%Y-%m-%d %H:%M:%S")),
+            "",
+            "## 一、交易统计",
+            "",
+            "| 指标 | 数值 |",
+            "|---|---:|",
+            "| 完成卖出笔数 | {} |".format(len(sells)),
+            "| 盈利笔数 | {} |".format(len(wins)),
+            "| 亏损笔数 | {} |".format(len(losses)),
+            "| 胜率 | {:.1f}% |".format(win_rate),
+            "| 已实现盈亏 | {:+.2f} USDT |".format(total_pnl),
+            "| 平均盈利 | {:+.2f} USDT |".format(avg_win),
+            "| 平均亏损 | {:+.2f} USDT |".format(avg_loss),
+            "| 盈亏比 | {:.2f} |".format(pl_ratio),
+            "| 止损清仓次数 | {} |".format(stop_count),
+            "| 止盈清仓次数 | {} |".format(tp2_count),
+            "| 机会提示次数 | {} |".format(opportunity_count),
+            "| 计划到期/移除 | {} |".format(expired),
+            "",
+        ]
+
+        # 各币种明细
+        all_symbols = set(PLANS.keys()) | set(self.state.get("dynamic_plans", {}).keys())
+        lines += ["## 二、各币种表现", "",
+                  "| 币种 | 卖出笔数 | 盈利 | 亏损 | 已实现盈亏 |",
+                  "|---|---:|---:|---:|---:|"]
+        for symbol in all_symbols:
+            items = [t for t in sells if t.get("symbol") == symbol]
+            if items:
+                lines.append("| {} | {} | {} | {} | {:+.2f} |".format(
+                    self.effective_plan(symbol)["name"], len(items),
+                    sum(t.get("pnl", 0) > 0 for t in items),
+                    sum(t.get("pnl", 0) < 0 for t in items),
+                    sum(t.get("pnl", 0) for t in items)))
+        if not sells:
+            lines.append("| 无交易记录 | - | - | - | - |")
+
+        # 持仓浮动盈亏
+        if open_positions:
+            lines += ["", "## 三、当前持仓浮动盈亏", "",
+                      "| 币种 | 投入成本 | 当前市值 | 浮动盈亏 | 收益率 |",
+                      "|---|---:|---:|---:|---:|"]
+            for p in open_positions:
+                lines.append("| {} | {:.2f} | {:.2f} | {:+.2f} | {:+.2f}% |".format(
+                    p["name"], p["cost"], p["value"], p["pnl"], p["pct"]))
+
+        # 策略优点分析
+        lines += ["", "## 四、策略优点", ""]
+        pros = []
+        if sells and win_rate >= 50:
+            pros.append("胜率 {:.1f}% 表现良好，多空判断方向准确。".format(win_rate))
+        if pl_ratio and pl_ratio >= 1.5:
+            pros.append("盈亏比 {:.2f}，盈利时幅度大于亏损，截亏让盈策略有效。".format(pl_ratio))
+        if tp2_count > 0:
+            pros.append("止盈2清仓 {} 次，趋势跟踪成功捕获到较大涨幅。".format(tp2_count))
+        if total_pnl > 0:
+            pros.append("本期已实现盈亏 {:+.2f} USDT，整体盈利。".format(total_pnl))
+        pros.append("自动化轮询执行消除了情绪干扰，严格执行止损止盈纪律。")
+        pros.append("分批建仓（50%/30%/20%）降低了择时风险，平均成本更优。")
+        if opportunity_count > 0:
+            pros.append("机会提示机制触发 {} 次，有效识别了未建仓但行情启动的标的。".format(opportunity_count))
+        pros.append("止损清仓后48小时冷却机制避免了频繁追涨杀跌。")
+        for p in pros:
+            lines.append("- {}".format(p))
+
+        # 策略缺点分析
+        lines += ["", "## 五、策略缺点", ""]
+        cons = []
+        if sells and win_rate < 40:
+            cons.append("胜率仅 {:.1f}%，买点判断偏乐观，回调幅度可能不够。".format(win_rate))
+        if loss and abs(avg_loss) > avg_win and avg_win > 0:
+            cons.append("平均亏损 {:+.2f} 大于平均盈利 {:+.2f}，止损偏松或止盈偏紧。".format(avg_loss, avg_win))
+        if stop_count > len(sells) * 0.6 if sells else False:
+            cons.append("止损清仓占比 {:.0f}%，止损可能过于密集。".format(stop_count / len(sells) * 100))
+        if expired > 2:
+            cons.append("计划到期/移除 {} 次，买点设置可能过于保守，错失行情。".format(expired))
+        if opportunity_count > 3:
+            cons.append("机会提示 {} 次但未建仓，趋势过滤条件可能过严。".format(opportunity_count))
+        if not sells:
+            cons.append("本期无完成卖出，交易频率偏低，策略参数可能不适配当前行情。")
+        if total_pnl < 0:
+            cons.append("本期已实现盈亏 {:+.2f} USDT，整体亏损，需审视买点和止损参数。".format(total_pnl))
+        for c in cons:
+            lines.append("- {}".format(c))
+        if not cons:
+            lines.append("- 暂未发现明显缺陷。")
+
+        # 改进建议
+        lines += ["", "## 六、改进建议", ""]
+        suggestions = []
+        if sells and win_rate < 40:
+            suggestions.append("适当放宽买入回调幅度（如从3-6%扩至4-7%），降低买入后被止损概率。")
+        if loss and abs(avg_loss) > avg_win and avg_win > 0:
+            suggestions.append("收紧止损距离或放宽止盈距离，使盈亏比回升至1.5以上。")
+        if expired > 2:
+            suggestions.append("降低买点保守度或缩短计划有效期，减少过期未触发的情况。")
+        if opportunity_count > 3:
+            suggestions.append("适度放宽趋势评分门槛，让更多机会转化为实际建仓。")
+        if not sells:
+            suggestions.append("检查当前风格参数是否匹配行情节奏，考虑切换风格或调整标的。")
+        if total_pnl < 0:
+            suggestions.append("复盘止损标的的行情特征，下一期计划剔除类似走势的标的。")
+        suggestions.append("持续累积样本数据，样本数达到20笔以上再考虑调整核心参数。")
+        for s in suggestions:
+            lines.append("- {}".format(s))
+
+        lines += ["", "## 七、优化纪律", "",
+                  "- 先累计样本再调参：单个周期完成卖出少于20笔时，只记录不改核心规则。",
+                  "- 优化目标同时看胜率、盈亏比、期望值和最大回撤，不能只看一笔输赢。",
+                  "- 若连续样本显示止损过密或买点过高，下一版计划只微调买入回撤、止损距离和仓位批次。",
+                  "", "> 仅为程序模拟复盘，不构成投资建议。"]
+
+        os.makedirs(REVIEW_DIR, exist_ok=True)
+        filename = "复盘_{}.md".format(now.strftime("%Y-%m-%d"))
+        filepath = os.path.join(REVIEW_DIR, filename)
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        print("[{}] 复盘报告已生成：{}".format(now.strftime("%m-%d %H:%M"), filepath))
 
     def run_once(self):
         # 合并原始计划和动态新增标的
@@ -927,6 +1128,7 @@ class CryptoTracker:
         self.save_state()
         self.write_report(quotes)
         self.push_scheduled_summary(quotes)
+        self.check_monthly_review()
         if events:
             content = self.build_push_html(events, quotes)
             push_async(self.build_push_title(events, quotes), content)

@@ -22,6 +22,7 @@ TRANSPARENT_COLOR = "#ff00ff"
 SIM_STATE_FILE = os.path.join(PLAN_DIR, "state.json")
 SIM_REPORT_FILE = os.path.join(PLAN_DIR, "report.md")
 SIM_REPORT_ARCHIVE_DIR = os.path.join(BASE_DIR, "stock_reports")
+REVIEW_DIR = os.path.join(BASE_DIR, "stock_reviews")
 SIM_CAPITAL = float(PLAN_CONFIG["capital"])
 PLAN_ID = PLAN_CONFIG["plan_id"]
 PLAN_DATE = PLAN_CONFIG["plan_date"]
@@ -520,6 +521,7 @@ class SimulationTracker:
                     state.setdefault("rescreened", {})
                     state.setdefault("replacements", {})
                     state.setdefault("plan_expired", {})
+                    state.setdefault("review_pushed", {})
                     return state
             except (OSError, ValueError):
                 pass
@@ -541,6 +543,7 @@ class SimulationTracker:
             "rescreened": {},
             "replacements": {},
             "plan_expired": {},
+            "review_pushed": {},
         }
 
     def save_state(self):
@@ -592,6 +595,7 @@ class SimulationTracker:
             quotes = self.state.get("last_quotes", {})
             self.write_report(quotes)
             self.push_scheduled_summary(quotes)
+        self.check_monthly_review()
         self.root.after(SIM_POLL_MS, self.poll)
 
     def load_and_process(self):
@@ -1050,6 +1054,189 @@ class SimulationTracker:
                     sum(t.get("pnl", 0) < 0 for t in items),
                     sum(t.get("pnl", 0) for t in items)))
         return lines
+
+    def check_monthly_review(self):
+        """每月15号和30号自动生成复盘报告"""
+        now = dt.datetime.now()
+        day = now.day
+        if day == 15:
+            marker = now.strftime("%Y-%m-15")
+            start_day, end_day = 1, 15
+        elif day == 30:
+            marker = now.strftime("%Y-%m-30")
+            start_day, end_day = 16, 30
+        else:
+            tomorrow = (now + dt.timedelta(days=1)).date()
+            if tomorrow.day == 1 and day >= 28:
+                marker = now.strftime("%Y-%m-EOM")
+                start_day, end_day = 16, day
+            else:
+                return
+        if self.state.get("review_pushed", {}).get(marker):
+            return
+        year, month = now.year, now.month
+        start = dt.date(year, month, start_day).isoformat()
+        end = dt.date(year, month, end_day).isoformat()
+        self.generate_review_report(start, end, marker)
+        self.state.setdefault("review_pushed", {})[marker] = now.strftime("%Y-%m-%d %H:%M")
+        self.save_state()
+
+    def generate_review_report(self, start, end, marker):
+        """生成策略复盘报告并写入独立文件"""
+        sells = []
+        for trade in self.state.get("trades", []):
+            if trade.get("action") != "sell":
+                continue
+            day = trade.get("date", "")[:10]
+            if start <= day <= end:
+                sells.append(trade)
+        wins = [t for t in sells if t.get("pnl", 0) > 0]
+        losses = [t for t in sells if t.get("pnl", 0) < 0]
+        profit = sum(t.get("pnl", 0) for t in wins)
+        loss = sum(t.get("pnl", 0) for t in losses)
+        total_pnl = sum(t.get("pnl", 0) for t in sells)
+        win_rate = len(wins) / len(sells) * 100 if sells else 0
+        avg_win = profit / len(wins) if wins else 0
+        avg_loss = loss / len(losses) if losses else 0
+        pl_ratio = profit / abs(loss) if loss else 0
+
+        # 当前持仓浮动盈亏
+        quotes = self.state.get("last_quotes", {})
+        open_positions = []
+        for code, pos in self.state.get("positions", {}).items():
+            price = quotes.get(code, {}).get("current", pos["buy_price"])
+            value = pos["shares"] * price
+            cost = pos["shares"] * pos["buy_price"]
+            pnl = value - cost
+            open_positions.append({
+                "name": self.effective_plan(code)["name"],
+                "pnl": pnl,
+                "pct": pnl / cost * 100 if cost else 0,
+                "cost": cost, "value": value})
+
+        # 交易特征统计
+        stop_count = sum(1 for t in sells if "止损" in t.get("reason", ""))
+        tp1_count = sum(1 for t in sells if "止盈1" in t.get("reason", ""))
+        tp2_count = sum(1 for t in sells if "止盈2" in t.get("reason", "") or "追踪" in t.get("reason", ""))
+
+        all_plans = dict(SIM_PLANS)
+        for code, dp in self.state.get("dynamic_plans", {}).items():
+            if code not in all_plans:
+                all_plans[code] = dp
+
+        now = dt.datetime.now()
+        lines = [
+            "# A股策略复盘报告 · {}".format(now.strftime("%Y-%m-%d")),
+            "",
+            "> 复盘区间：{} 至 {}".format(start, end),
+            "> 计划期：{}".format(self.state.get("plan_id", PLAN_ID)),
+            "> 生成时间：{}".format(now.strftime("%Y-%m-%d %H:%M:%S")),
+            "",
+            "## 一、交易统计",
+            "",
+            "| 指标 | 数值 |",
+            "|---|---:|",
+            "| 完成卖出笔数 | {} |".format(len(sells)),
+            "| 盈利笔数 | {} |".format(len(wins)),
+            "| 亏损笔数 | {} |".format(len(losses)),
+            "| 胜率 | {:.1f}% |".format(win_rate),
+            "| 已实现盈亏 | {:+.2f} 元 |".format(total_pnl),
+            "| 平均盈利 | {:+.2f} 元 |".format(avg_win),
+            "| 平均亏损 | {:+.2f} 元 |".format(avg_loss),
+            "| 盈亏比 | {:.2f} |".format(pl_ratio),
+            "| 止损清仓次数 | {} |".format(stop_count),
+            "| 止盈1卖出次数 | {} |".format(tp1_count),
+            "| 止盈2清仓次数 | {} |".format(tp2_count),
+            "",
+        ]
+
+        # 各股票明细
+        lines += ["## 二、各股票表现", "",
+                  "| 股票 | 代码 | 卖出笔数 | 盈利 | 亏损 | 已实现盈亏 |",
+                  "|---|---:|---:|---:|---:|---:|"]
+        for code, plan in all_plans.items():
+            items = [t for t in sells if t.get("code") == code]
+            if items:
+                lines.append("| {} | {} | {} | {} | {} | {:+.2f} |".format(
+                    plan["name"], code[-6:], len(items),
+                    sum(t.get("pnl", 0) > 0 for t in items),
+                    sum(t.get("pnl", 0) < 0 for t in items),
+                    sum(t.get("pnl", 0) for t in items)))
+        if not sells:
+            lines.append("| 无交易记录 | - | - | - | - | - |")
+
+        # 持仓浮动盈亏
+        if open_positions:
+            lines += ["", "## 三、当前持仓浮动盈亏", "",
+                      "| 股票 | 投入成本 | 当前市值 | 浮动盈亏 | 收益率 |",
+                      "|---|---:|---:|---:|---:|"]
+            for p in open_positions:
+                lines.append("| {} | {:.2f} | {:.2f} | {:+.2f} | {:+.2f}% |".format(
+                    p["name"], p["cost"], p["value"], p["pnl"], p["pct"]))
+
+        # 策略优点分析
+        lines += ["", "## 四、策略优点", ""]
+        pros = []
+        if sells and win_rate >= 50:
+            pros.append("胜率 {:.1f}% 表现良好，买点判断方向准确。".format(win_rate))
+        if pl_ratio and pl_ratio >= 1.5:
+            pros.append("盈亏比 {:.2f}，盈利时幅度大于亏损，截亏让盈策略有效。".format(pl_ratio))
+        if tp2_count > 0:
+            pros.append("止盈2清仓 {} 次，趋势跟踪成功捕获到较大涨幅。".format(tp2_count))
+        if total_pnl > 0:
+            pros.append("本期已实现盈亏 {:+.2f} 元，整体盈利。".format(total_pnl))
+        pros.append("自动化轮询执行消除了情绪干扰，严格执行止损止盈纪律。")
+        pros.append("多时间框架（日线+周线）趋势确认过滤了逆势建仓风险。")
+        pros.append("A股T+1规则下通过分批建仓降低择时风险，平均成本更优。")
+        pros.append("止盈1后止损上移成本价，保护已有利润不回吐。")
+        for p in pros:
+            lines.append("- {}".format(p))
+
+        # 策略缺点分析
+        lines += ["", "## 五、策略缺点", ""]
+        cons = []
+        if sells and win_rate < 40:
+            cons.append("胜率仅 {:.1f}%，买点判断偏乐观，回调幅度可能不够。".format(win_rate))
+        if loss and abs(avg_loss) > avg_win and avg_win > 0:
+            cons.append("平均亏损 {:+.2f} 大于平均盈利 {:+.2f}，止损偏松或止盈偏紧。".format(avg_loss, avg_win))
+        if sells and stop_count > len(sells) * 0.6:
+            cons.append("止损清仓占比 {:.0f}%，止损可能过于密集。".format(stop_count / len(sells) * 100))
+        if not sells:
+            cons.append("本期无完成卖出，交易频率偏低，策略参数可能不适配当前行情。")
+        if total_pnl < 0:
+            cons.append("本期已实现盈亏 {:+.2f} 元，整体亏损，需审视买点和止损参数。".format(total_pnl))
+        for c in cons:
+            lines.append("- {}".format(c))
+        if not cons:
+            lines.append("- 暂未发现明显缺陷。")
+
+        # 改进建议
+        lines += ["", "## 六、改进建议", ""]
+        suggestions = []
+        if sells and win_rate < 40:
+            suggestions.append("适当放宽买入回调幅度，降低买入后被止损概率。")
+        if loss and abs(avg_loss) > avg_win and avg_win > 0:
+            suggestions.append("收紧止损距离或放宽止盈距离，使盈亏比回升至1.5以上。")
+        if not sells:
+            suggestions.append("检查当前风格参数是否匹配行情节奏，考虑切换风格或调整标的。")
+        if total_pnl < 0:
+            suggestions.append("复盘止损标的的行情特征，下一期计划剔除类似走势的标的。")
+        suggestions.append("持续累积样本数据，样本数达到20笔以上再考虑调整核心参数。")
+        for s in suggestions:
+            lines.append("- {}".format(s))
+
+        lines += ["", "## 七、优化纪律", "",
+                  "- 先累计样本再调参：单个周期完成卖出少于20笔时，只记录不改核心规则。",
+                  "- 优化目标同时看胜率、盈亏比、期望值和最大回撤，不能只看一笔输赢。",
+                  "- 若连续样本显示买入区间过高或止损过密，下一版计划只微调买入区间、止损距离和止盈分批。",
+                  "", "> 仅为程序模拟复盘，不构成投资建议。"]
+
+        os.makedirs(REVIEW_DIR, exist_ok=True)
+        filename = "复盘_{}.md".format(now.strftime("%Y-%m-%d"))
+        filepath = os.path.join(REVIEW_DIR, filename)
+        with open(filepath, "w", encoding="utf-8") as file:
+            file.write("\n".join(lines) + "\n")
+        print("[{}] 复盘报告已生成：{}".format(now.strftime("%m-%d %H:%M"), filepath))
 
     def write_report(self, quotes):
         # 非交易时间或本次取行情失败时，沿用最后一次有效行情，避免估值被买入价覆盖
