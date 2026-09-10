@@ -1232,7 +1232,7 @@ class SimulationTracker:
                   "", "> 仅为程序模拟复盘，不构成投资建议。"]
 
         os.makedirs(REVIEW_DIR, exist_ok=True)
-        filename = "复盘_{}.md".format(now.strftime("%Y-%m-%d"))
+        filename = "复盘_{}_股.md".format(now.strftime("%Y-%m-%d"))
         filepath = os.path.join(REVIEW_DIR, filename)
         with open(filepath, "w", encoding="utf-8") as file:
             file.write("\n".join(lines) + "\n")
