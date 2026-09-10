@@ -36,6 +36,17 @@ TRAILING_TP_PCT = 0.08       # 止盈1后追踪止盈回撤比例
 OPPORTUNITY_THRESHOLD = 0.10 # 未建仓但远离买点上限10%触发机会提示
 EXTENDED_OBSERVATION_DAYS = 5  # 到期后持续观察天数
 
+# 动态替换候选池（流动性好的大盘股）
+STOCK_CANDIDATE_POOL = {
+    "sh600519": "贵州茅台", "sh601318": "中国平安", "sh600036": "招商银行",
+    "sz000858": "五粮液", "sh601012": "隆基绿能", "sh600276": "恒瑞医药",
+    "sz000333": "美的集团", "sz002594": "比亚迪", "sh600900": "长江电力",
+    "sz000725": "京东方A", "sh601688": "华泰证券", "sh600030": "中信证券",
+    "sh601668": "中国建筑", "sh600887": "伊利股份", "sz002415": "海康威视",
+    "sh601628": "中国人寿", "sh600585": "海螺水泥", "sz000651": "格力电器",
+    "sh601857": "中国石油", "sz002230": "科大讯飞",
+}
+
 
 def fetch_stock_klines(code, scale="240", count=30):
     """获取A股日K线数据，scale=240表示日线"""
@@ -76,7 +87,37 @@ def generate_dynamic_stock_plan(code, current_price, name):
         "stop": round(current_price * 0.91, 2),
         "tp1": round(current_price * 1.08, 2),
         "tp2": round(current_price * 1.15, 2),
+        "start_date": dt.date.today().isoformat(),
     }
+
+
+def screen_new_stock_candidate(exclude_codes):
+    """从候选池筛选最优替换标的"""
+    pool = {k: v for k, v in STOCK_CANDIDATE_POOL.items() if k not in exclude_codes}
+    if not pool:
+        return None
+    try:
+        quotes = fetch_quotes(list(pool.keys()))
+    except Exception:
+        return None
+    candidates = []
+    for code, name in pool.items():
+        quote = quotes.get(code)
+        if not quote:
+            continue
+        price = quote["current"]
+        if price <= 0:
+            continue
+        mom = calc_stock_momentum(code)
+        if mom["pct_15d"] >= 0.05 or mom["pct_30d"] >= 0.10:
+            candidates.append({
+                "code": code, "name": name, "price": price,
+                "pct_15d": mom["pct_15d"], "pct_30d": mom["pct_30d"],
+            })
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x["pct_15d"], reverse=True)
+    return candidates[0]
 
 
 def normalize_code(code: str) -> str:
@@ -158,6 +199,8 @@ class SimulationTracker:
                     state.setdefault("dynamic_plans", {})
                     state.setdefault("opportunity_pushed", {})
                     state.setdefault("rescreened", {})
+                    state.setdefault("replacements", {})
+                    state.setdefault("plan_expired", {})
                     return state
             except (OSError, ValueError):
                 pass
@@ -177,6 +220,8 @@ class SimulationTracker:
             "dynamic_plans": {},
             "opportunity_pushed": {},
             "rescreened": {},
+            "replacements": {},
+            "plan_expired": {},
         }
 
     def save_state(self):
@@ -185,6 +230,32 @@ class SimulationTracker:
 
     def effective_plan(self, code):
         return self.state.get("dynamic_plans", {}).get(code) or SIM_PLANS[code]
+
+    def try_replacement(self, expired_code, expired_name, alerts):
+        """标的被移除后，自动筛选一个新标的补进来"""
+        replacements = self.state.setdefault("replacements", {})
+        if expired_code in replacements:
+            return
+        exclude = set(SIM_PLANS.keys()) | set(self.state.get("plan_expired", {}).keys()) | \
+                  set(self.state.get("dynamic_plans", {}).keys()) | \
+                  set(self.state.get("cycle_done", {}).keys())
+        exclude |= {v for v in replacements.values() if v}
+        candidate = screen_new_stock_candidate(exclude)
+        if candidate:
+            new_plan = generate_dynamic_stock_plan(candidate["code"], candidate["price"], candidate["name"])
+            self.state.setdefault("dynamic_plans", {})[candidate["code"]] = new_plan
+            replacements[expired_code] = candidate["code"]
+            alerts.append({
+                "code": candidate["code"], "kind": "replace", "price": candidate["price"],
+                "text": "替换 {}：新增 {}，当前价 {:.2f}，15d动量 {:+.2%}，30d动量 {:+.2%}，"
+                        "买点 {:.2f}-{:.2f}，止损 {:.2f}，止盈 {:.2f}/{:.2f}".format(
+                    expired_name, candidate["name"], candidate["price"],
+                    candidate["pct_15d"], candidate["pct_30d"],
+                    new_plan["buy_low"], new_plan["buy_high"],
+                    new_plan["stop"], new_plan["tp1"], new_plan["tp2"])
+            })
+        else:
+            replacements[expired_code] = None
 
     def poll(self):
         now = dt.datetime.now()
@@ -206,7 +277,8 @@ class SimulationTracker:
 
     def load_and_process(self):
         try:
-            quotes = fetch_quotes(list(SIM_PLANS))
+            all_codes = list(SIM_PLANS.keys()) + [c for c in self.state.get("dynamic_plans", {}) if c not in SIM_PLANS]
+            quotes = fetch_quotes(all_codes)
         except Exception:
             return
         self.root.after(0, self.process, quotes)
@@ -225,7 +297,11 @@ class SimulationTracker:
             day_log["actions"] = [action for action in day_log.get("actions", []) if action != "无交易"]
         alerts = []
         now = dt.datetime.now()
-        for code, plan in SIM_PLANS.items():
+        all_plans = dict(SIM_PLANS)
+        for code, dp in self.state.get("dynamic_plans", {}).items():
+            if code not in all_plans:
+                all_plans[code] = dp
+        for code, plan in all_plans.items():
             quote = quotes.get(code)
             if not quote:
                 continue
@@ -313,7 +389,7 @@ class SimulationTracker:
                     continue
 
                 # 计划到期处理
-                start_date = self.state.get("start_date")
+                start_date = ep.get("start_date") or self.state.get("start_date")
                 if start_date:
                     start_dt = dt.date.fromisoformat(start_date)
                     days = (dt.date.today() - start_dt).days
@@ -339,6 +415,7 @@ class SimulationTracker:
                                                    EXTENDED_OBSERVATION_DAYS,
                                                    mom["pct_15d"], mom["pct_30d"])})
                                 self.state.setdefault("plan_expired", {})[code] = True
+                                self.try_replacement(code, plan["name"], alerts)
                                 continue
                             else:
                                 today_str = now.date().isoformat()
@@ -463,10 +540,11 @@ class SimulationTracker:
             "rescreen": ("到期重新筛选", "#3b82f6"),
             "opportunity": ("大涨机会提示", "#8b5cf6"),
             "expire": ("计划到期/移除", "#6b7280"),
+            "replace": ("新增替换标的", "#2563eb"),
         }
         # 标题一眼看出：什么股、什么操作、什么价
         title_action = {"buy": "买入", "tp1": "止盈卖半", "tp2": "止盈清仓", "stop": "止损清仓",
-                        "rescreen": "重新筛选", "opportunity": "机会提示", "expire": "计划到期"}
+                        "rescreen": "重新筛选", "opportunity": "机会提示", "expire": "计划到期", "replace": "新增替换"}
 
         def one_line(ev):
             name = self.effective_plan(ev["code"])["name"]
@@ -606,7 +684,7 @@ class SimulationTracker:
                      profit / len(wins) if wins else 0, loss / len(losses) if losses else 0),
                  "- 盈亏比：{}".format("{:.2f}".format(profit / abs(loss)) if loss else ("暂无亏损样本" if not profit else "无亏损样本")),
                  "", "| 股票 | 代码 | 完成卖出 | 盈利 | 亏损 | 已实现盈亏 |", "|---|---:|---:|---:|---:|---:|"]
-        for code, plan in SIM_PLANS.items():
+        for code, plan in all_plans.items():
             items = [t for t in trades if t.get("code") == code]
             if items:
                 lines.append("| {} | {} | {} | {} | {} | {:+.2f} |".format(
@@ -624,6 +702,10 @@ class SimulationTracker:
         end = self.state["end_date"] or "未开始"
         plan_id = self.state.get("plan_id", PLAN_ID)
         plan_date = self.state.get("plan_date", PLAN_DATE)
+        all_plans = dict(SIM_PLANS)
+        for code, dp in self.state.get("dynamic_plans", {}).items():
+            if code not in all_plans:
+                all_plans[code] = dp
         market_value = self.state["cash"]
         cost_total = 0.0
         pnl_total = 0.0
@@ -670,7 +752,7 @@ class SimulationTracker:
         budget_each = SIM_CAPITAL / len(SIM_PLANS)
         expected_win = 0.0
         expected_loss = 0.0
-        for code, plan in SIM_PLANS.items():
+        for code, plan in all_plans.items():
             ep = self.effective_plan(code)
             buy_mid = (ep["buy_low"] + ep["buy_high"]) / 2
             shares = int(budget_each // buy_mid // 100) * 100
@@ -716,7 +798,7 @@ class SimulationTracker:
             "| 股票 | 代码 | 最新价 | 24h涨跌 | 计划状态 |",
             "|---|---:|---:|---:|---|",
         ])
-        for code, plan in SIM_PLANS.items():
+        for code, plan in all_plans.items():
             ep = self.effective_plan(code)
             quote = quotes.get(code)
             if not quote:

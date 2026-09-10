@@ -37,6 +37,9 @@ MOMENTUM_15D_MIN = 0.05      # 15天动量最低5%算有行情
 MOMENTUM_30D_MIN = 0.10       # 30天动量最低10%算有行情
 EXTENDED_OBSERVATION_DAYS = 5  # 到期后持续观察天数
 
+# 稳定币和杠杆代币排除
+STABLECOINS = {"USDCUSDT", "BUSDUSDT", "FDUSDUSDT", "TUSDUSDT", "DAIUSDT", "USDPUSDT", "EURUSDT"}
+
 
 def plan_buy_low(plan):
     return plan["tranches"][-1]["price"]
@@ -74,7 +77,7 @@ def calc_momentum(symbol):
         return {"pct_15d": 0.0, "pct_30d": 0.0}
 
 
-def generate_dynamic_plan(symbol, current_price, name, logic):
+def generate_dynamic_plan(symbol, current_price, name, logic=""):
     return {
         "name": name,
         "tranches": [
@@ -86,7 +89,45 @@ def generate_dynamic_plan(symbol, current_price, name, logic):
         "tp1": round_price(current_price * 1.08),
         "tp2": round_price(current_price * 1.15),
         "logic": "动态重新筛选：" + logic,
+        "start_date": dt.date.today().isoformat(),
     }
+
+
+def screen_new_crypto_candidate(exclude_symbols):
+    """扫描Binance USDT交易对，选出不在排除列表中的最优候选"""
+    try:
+        url = "{}/api/v3/ticker/24hr".format(BINANCE)
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            tickers = json.loads(resp.read().decode("utf-8"))
+        candidates = []
+        for t in tickers:
+            sym = t.get("symbol", "")
+            if not sym.endswith("USDT") or sym in exclude_symbols or sym in STABLECOINS:
+                continue
+            # 排除杠杆代币
+            if any(sym.startswith(p) for p in ("BULL", "BEAR", "UP", "DOWN")):
+                continue
+            try:
+                vol = float(t.get("quoteVolume", 0))
+                pct = float(t.get("priceChangePercent", 0))
+                price = float(t.get("lastPrice", 0))
+            except (ValueError, TypeError):
+                continue
+            if vol < 50_000_000 or price <= 0:
+                continue
+            candidates.append({"symbol": sym, "pct24": pct, "price": price, "vol": vol})
+        candidates.sort(key=lambda x: x["pct24"], reverse=True)
+        # 取前10名计算动量
+        for c in candidates[:10]:
+            mom = calc_momentum(c["symbol"])
+            if mom["pct_15d"] >= MOMENTUM_15D_MIN or mom["pct_30d"] >= MOMENTUM_30D_MIN:
+                c["pct_15d"] = mom["pct_15d"]
+                c["pct_30d"] = mom["pct_30d"]
+                return c
+        return None
+    except Exception:
+        return None
 
 
 def fetch_ticker(symbol):
@@ -144,6 +185,7 @@ class CryptoTracker:
                 state.setdefault("dynamic_plans", {})
                 state.setdefault("opportunity_pushed", {})
                 state.setdefault("rescreened", {})
+                state.setdefault("replacements", {})
                 return state
             except (OSError, ValueError):
                 pass
@@ -162,6 +204,7 @@ class CryptoTracker:
             "dynamic_plans": {},
             "opportunity_pushed": {},
             "rescreened": {},
+            "replacements": {},
         }
 
     def save_state(self):
@@ -179,6 +222,34 @@ class CryptoTracker:
 
     def effective_plan(self, symbol):
         return self.state.get("dynamic_plans", {}).get(symbol) or PLANS[symbol]
+
+    def try_replacement(self, expired_symbol, expired_name, events):
+        """标的被移除后，自动筛选一个新标的补进来"""
+        replacements = self.state.setdefault("replacements", {})
+        if expired_symbol in replacements:
+            return
+        exclude = set(PLANS.keys()) | set(self.state.get("plan_expired", {}).keys()) | \
+                  set(self.state.get("dynamic_plans", {}).keys()) | \
+                  set(self.state.get("cycle_done", {}).keys())
+        exclude |= {v for v in replacements.values() if v}
+        candidate = screen_new_crypto_candidate(exclude)
+        if candidate:
+            new_name = candidate["symbol"].replace("USDT", "")
+            new_plan = generate_dynamic_plan(candidate["symbol"], candidate["price"], new_name)
+            self.state.setdefault("dynamic_plans", {})[candidate["symbol"]] = new_plan
+            replacements[expired_symbol] = candidate["symbol"]
+            events.append({
+                "symbol": candidate["symbol"], "kind": "replace",
+                "msg": "替换 {}：新增 {}，当前价 {:.4f}，15d动量 {:+.2%}，30d动量 {:+.2%}，"
+                       "买点 {}/{}/{}, 止损 {}, 止盈 {}/{}".format(
+                    expired_name, new_name, candidate["price"],
+                    candidate["pct_15d"], candidate["pct_30d"],
+                    new_plan["tranches"][0]["price"], new_plan["tranches"][1]["price"],
+                    new_plan["tranches"][2]["price"], new_plan["stop"],
+                    new_plan["tp1"], new_plan["tp2"])
+            })
+        else:
+            replacements[expired_symbol] = None
 
     def period_summary(self, start, end):
         trades = []
@@ -205,15 +276,17 @@ class CryptoTracker:
             items = [t for t in trades if t.get("symbol") == symbol]
             if items:
                 lines.append("| {} | {} | {} | {} | {:+.2f} |".format(
-                    PLANS[symbol]["name"], len(items),
+                    self.effective_plan(symbol)["name"], len(items),
                     sum(t.get("pnl", 0) > 0 for t in items),
                     sum(t.get("pnl", 0) < 0 for t in items),
                     sum(t.get("pnl", 0) for t in items)))
         return lines
 
     def run_once(self):
+        # 合并原始计划和动态新增标的
+        all_symbols = set(PLANS.keys()) | set(self.state.get("dynamic_plans", {}).keys())
         quotes = {}
-        for symbol in PLANS:
+        for symbol in all_symbols:
             try:
                 quotes[symbol] = fetch_ticker(symbol)
             except Exception:
@@ -226,7 +299,11 @@ class CryptoTracker:
         events = []
         budget_each = SIM_CAPITAL / len(PLANS)
         now = dt.datetime.now()
-        for symbol, plan in PLANS.items():
+        all_plans = dict(PLANS)
+        for sym, dp in self.state.get("dynamic_plans", {}).items():
+            if sym not in all_plans:
+                all_plans[sym] = dp
+        for symbol, plan in all_plans.items():
             q = quotes.get(symbol)
             if not q:
                 continue
@@ -327,7 +404,7 @@ class CryptoTracker:
                 if self.state["plan_expired"].get(symbol):
                     continue
 
-                days = (dt.date.today() - dt.date.fromisoformat(self.state["start_date"])).days
+                days = (dt.date.today() - dt.date.fromisoformat(ep.get("start_date") or self.state["start_date"])).days
                 buy_high = ep["tranches"][0]["price"]
 
                 # 计划到期：重新跑动量筛选
@@ -360,6 +437,7 @@ class CryptoTracker:
                                 "msg": "计划到期后持续观察 {} 天仍无行情（15d {pct_15d:+.2%}，30d {pct_30d:+.2%}），移出本期".format(
                                     EXTENDED_OBSERVATION_DAYS,
                                     pct_15d=mom["pct_15d"], pct_30d=mom["pct_30d"])})
+                            self.try_replacement(symbol, plan["name"], events)
                             continue
                         else:
                             today_str = now.date().isoformat()
@@ -379,6 +457,7 @@ class CryptoTracker:
                         "symbol": symbol, "kind": "expire",
                         "msg": "价格 {:.4f} 已跌破止损位 {}，建仓形态失效，计划作废不再买入".format(
                             price, ep["stop"])})
+                    self.try_replacement(symbol, plan["name"], events)
                     continue
 
                 # 未建仓但大涨：机会提示（每天最多1条）
@@ -431,6 +510,7 @@ class CryptoTracker:
         "expire": "计划到期",
         "rescreen": "重新筛选",
         "opportunity": "机会提示",
+        "replace": "新增替换",
     }
 
     def build_push_title(self, events, quotes):
@@ -489,6 +569,7 @@ class CryptoTracker:
         "expire": ("计划到期/移除", "#6b7280"),
         "rescreen": ("到期重新筛选", "#3b82f6"),
         "opportunity": ("大涨机会提示", "#8b5cf6"),
+        "replace": ("新增替换标的", "#2563eb"),
     }
 
     def closed_trade_records(self):
