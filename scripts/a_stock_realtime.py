@@ -30,6 +30,54 @@ PUSHPLUS_TOKEN = "e39674189a874c48888292f80e0c3464"
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
 SIM_PLANS = PLAN_CONFIG["plans"]
 
+# 动态调整参数
+COOLDOWN_HOURS = 48          # 止损清仓后冷却小时数
+TRAILING_TP_PCT = 0.08       # 止盈1后追踪止盈回撤比例
+OPPORTUNITY_THRESHOLD = 0.10 # 未建仓但远离买点上限10%触发机会提示
+EXTENDED_OBSERVATION_DAYS = 5  # 到期后持续观察天数
+
+
+def fetch_stock_klines(code, scale="240", count=30):
+    """获取A股日K线数据，scale=240表示日线"""
+    url = "https://quotes.sina.cn/cn/api/jsonp.php/var_/CN_MarketDataService.getKLineData?symbol={}&scale={}&datalen={}".format(
+        normalize_code(code), scale, count)
+    request = urllib.request.Request(url, headers={
+        "Referer": "https://finance.sina.com.cn",
+        "User-Agent": "Mozilla/5.0",
+    })
+    with urllib.request.urlopen(request, timeout=10) as response:
+        text = response.read().decode("utf-8", errors="ignore")
+    start = text.find("[")
+    end = text.rfind("]")
+    if start < 0 or end < 0:
+        return []
+    return json.loads(text[start:end + 1])
+
+
+def calc_stock_momentum(code):
+    """计算15天和30天动量"""
+    try:
+        klines = fetch_stock_klines(code, "240", 31)
+        if len(klines) < 16:
+            return {"pct_15d": 0.0, "pct_30d": 0.0}
+        pct_15d = (float(klines[-1]["close"]) - float(klines[-16]["close"])) / float(klines[-16]["close"])
+        pct_30d = (float(klines[-1]["close"]) - float(klines[0]["close"])) / float(klines[0]["close"])
+        return {"pct_15d": pct_15d, "pct_30d": pct_30d}
+    except Exception:
+        return {"pct_15d": 0.0, "pct_30d": 0.0}
+
+
+def generate_dynamic_stock_plan(code, current_price, name):
+    """基于当前价格生成动态计划"""
+    return {
+        "name": name,
+        "buy_low": round(current_price * 0.97, 2),
+        "buy_high": round(current_price * 0.99, 2),
+        "stop": round(current_price * 0.91, 2),
+        "tp1": round(current_price * 1.08, 2),
+        "tp2": round(current_price * 1.15, 2),
+    }
+
 
 def normalize_code(code: str) -> str:
     code = code.strip().lower()
@@ -105,6 +153,11 @@ class SimulationTracker:
                     state.setdefault("plan_id", PLAN_ID)
                     state.setdefault("plan_date", PLAN_DATE)
                     state.setdefault("summary_pushes", {})
+                    state.setdefault("cooldown", {})
+                    state.setdefault("cycle_done", {})
+                    state.setdefault("dynamic_plans", {})
+                    state.setdefault("opportunity_pushed", {})
+                    state.setdefault("rescreened", {})
                     return state
             except (OSError, ValueError):
                 pass
@@ -119,11 +172,19 @@ class SimulationTracker:
             "daily": [],
             "last_quotes": {},
             "summary_pushes": {},
+            "cooldown": {},
+            "cycle_done": {},
+            "dynamic_plans": {},
+            "opportunity_pushed": {},
+            "rescreened": {},
         }
 
     def save_state(self):
         with open(SIM_STATE_FILE, "w", encoding="utf-8") as file:
             json.dump(self.state, file, ensure_ascii=False, indent=2)
+
+    def effective_plan(self, code):
+        return self.state.get("dynamic_plans", {}).get(code) or SIM_PLANS[code]
 
     def poll(self):
         now = dt.datetime.now()
@@ -163,14 +224,19 @@ class SimulationTracker:
         else:
             day_log["actions"] = [action for action in day_log.get("actions", []) if action != "无交易"]
         alerts = []
+        now = dt.datetime.now()
         for code, plan in SIM_PLANS.items():
             quote = quotes.get(code)
             if not quote:
                 continue
             position = self.state["positions"].get(code)
             price = quote["current"]
+            ep = self.effective_plan(code)
+
             if position:
-                if price <= plan["stop"]:
+                # --- 持仓中 ---
+                stop_price = max(ep["stop"], position["buy_price"]) if position["tp1_done"] else ep["stop"]
+                if price <= stop_price:
                     event_value = position["shares"] * price
                     event_cost = position["shares"] * position["buy_price"]
                     event_pnl = event_value - event_cost
@@ -181,7 +247,10 @@ class SimulationTracker:
                                    "position_pnl": event_pnl,
                                    "position_pnl_pct": event_pnl_pct,
                                    "position_value": event_value})
-                elif not position["tp1_done"] and price >= plan["tp1"]:
+                    # 设冷却期
+                    cooldown_until = now + dt.timedelta(hours=COOLDOWN_HOURS)
+                    self.state.setdefault("cooldown", {})[code] = cooldown_until.strftime("%Y-%m-%d %H:%M")
+                elif not position["tp1_done"] and price >= ep["tp1"]:
                     shares = position["shares"] // 2
                     if shares:
                         event_value = position["shares"] * price
@@ -195,34 +264,126 @@ class SimulationTracker:
                                        "position_pnl_pct": event_pnl_pct,
                                        "position_value": event_value})
                         self.state["positions"][code]["tp1_done"] = True
-                elif position["tp1_done"] and price >= plan["tp2"]:
-                    event_value = position["shares"] * price
-                    event_cost = position["shares"] * position["buy_price"]
-                    event_pnl = event_value - event_cost
-                    event_pnl_pct = event_pnl / event_cost * 100 if event_cost else 0
-                    action = self.sell(code, price, position["shares"], "第二止盈")
-                    day_log["actions"].append(action)
-                    alerts.append({"code": code, "kind": "tp2", "price": price, "text": action,
-                                   "position_pnl": event_pnl,
-                                   "position_pnl_pct": event_pnl_pct,
-                                   "position_value": event_value})
-            elif plan["buy_low"] <= price <= plan["buy_high"]:
-                budget = SIM_CAPITAL / len(SIM_PLANS)
-                shares = int(budget // price // 100) * 100
-                if shares:
-                    cost = shares * price
-                    self.state["cash"] -= cost
-                    self.state["positions"][code] = {
-                        "shares": shares,
-                        "buy_price": price,
-                        "buy_date": today,
-                        "tp1_done": False,
-                    }
-                    action = "买入 {} {} 股，成交价 {:.2f} 元".format(plan["name"], shares, price)
-                    self.record(action, code=code, action="buy", price=price, shares=shares,
-                                value=cost, plan_version=self.state.get("plan_id", PLAN_ID))
-                    day_log["actions"].append(action)
-                    alerts.append({"code": code, "kind": "buy", "price": price, "text": action})
+                        self.state["positions"][code]["peak_price"] = price
+                elif position["tp1_done"]:
+                    peak = position.get("peak_price", price)
+                    if price > peak:
+                        position["peak_price"] = price
+                        peak = price
+                    trailing_stop = peak * (1 - TRAILING_TP_PCT)
+                    if price >= ep["tp2"]:
+                        event_value = position["shares"] * price
+                        event_cost = position["shares"] * position["buy_price"]
+                        event_pnl = event_value - event_cost
+                        event_pnl_pct = event_pnl / event_cost * 100 if event_cost else 0
+                        action = self.sell(code, price, position["shares"], "第二止盈")
+                        day_log["actions"].append(action)
+                        alerts.append({"code": code, "kind": "tp2", "price": price, "text": action,
+                                       "position_pnl": event_pnl,
+                                       "position_pnl_pct": event_pnl_pct,
+                                       "position_value": event_value})
+                        self.state.setdefault("cycle_done", {})[code] = True
+                    elif price <= trailing_stop:
+                        event_value = position["shares"] * price
+                        event_cost = position["shares"] * position["buy_price"]
+                        event_pnl = event_value - event_cost
+                        event_pnl_pct = event_pnl / event_cost * 100 if event_cost else 0
+                        action = self.sell(code, price, position["shares"],
+                                          "追踪止盈（最高 {:.2f} 回撤 {:.0f}%）".format(peak, TRAILING_TP_PCT * 100))
+                        day_log["actions"].append(action)
+                        alerts.append({"code": code, "kind": "tp2", "price": price, "text": action,
+                                       "position_pnl": event_pnl,
+                                       "position_pnl_pct": event_pnl_pct,
+                                       "position_value": event_value})
+                        self.state.setdefault("cycle_done", {})[code] = True
+            else:
+                # --- 空仓 ---
+                # 冷却期内不建仓
+                cooldown_str = self.state.get("cooldown", {}).get(code)
+                if cooldown_str:
+                    try:
+                        cooldown_time = dt.datetime.strptime(cooldown_str, "%Y-%m-%d %H:%M")
+                        if now < cooldown_time:
+                            continue
+                    except ValueError:
+                        pass
+
+                # 止盈2清仓后本期不再用旧参数重建仓
+                if self.state.get("cycle_done", {}).get(code):
+                    continue
+
+                # 计划到期处理
+                start_date = self.state.get("start_date")
+                if start_date:
+                    start_dt = dt.date.fromisoformat(start_date)
+                    days = (dt.date.today() - start_dt).days
+                    if days >= SIM_DAYS:
+                        mom = calc_stock_momentum(code)
+                        has_momentum = mom["pct_15d"] >= 0.05 or mom["pct_30d"] >= 0.10
+
+                        if has_momentum:
+                            if not self.state.get("rescreened", {}).get(code):
+                                new_plan = generate_dynamic_stock_plan(code, price, plan["name"])
+                                self.state.setdefault("dynamic_plans", {})[code] = new_plan
+                                self.state.setdefault("rescreened", {})[code] = True
+                                ep = new_plan
+                                alerts.append({"code": code, "kind": "rescreen", "price": price,
+                                               "text": "计划到期重新筛选：15d动量 {:.2%}，30d动量 {:.2%}，已生成新买点 {:.2f}-{:.2f}，止损 {:.2f}，止盈 {:.2f}/{:.2f}".format(
+                                                   mom["pct_15d"], mom["pct_30d"],
+                                                   ep["buy_low"], ep["buy_high"], ep["stop"],
+                                                   ep["tp1"], ep["tp2"])})
+                        else:
+                            if days >= SIM_DAYS + EXTENDED_OBSERVATION_DAYS:
+                                alerts.append({"code": code, "kind": "expire", "price": price,
+                                               "text": "计划到期后持续观察 {} 天仍无行情（15d {:.2%}，30d {:.2%}），移出本期".format(
+                                                   EXTENDED_OBSERVATION_DAYS,
+                                                   mom["pct_15d"], mom["pct_30d"])})
+                                self.state.setdefault("plan_expired", {})[code] = True
+                                continue
+                            else:
+                                today_str = now.date().isoformat()
+                                observe_key = code + "_observe"
+                                if self.state.get("opportunity_pushed", {}).get(observe_key) != today_str:
+                                    self.state.setdefault("opportunity_pushed", {})[observe_key] = today_str
+                                    alerts.append({"code": code, "kind": "rescreen", "price": price,
+                                                   "text": "计划到期但暂无行情（15d {:.2%}，30d {:.2%}），持续观察中（第 {} 天）".format(
+                                                       mom["pct_15d"], mom["pct_30d"], days)})
+                                continue
+
+                if self.state.get("plan_expired", {}).get(code):
+                    continue
+
+                # 未建仓但大涨：机会提示（每天最多1条）
+                if price > ep["buy_high"] * (1 + OPPORTUNITY_THRESHOLD):
+                    today_str = now.date().isoformat()
+                    opp_key = code + "_opp"
+                    if self.state.get("opportunity_pushed", {}).get(opp_key) != today_str:
+                        mom = calc_stock_momentum(code)
+                        if mom["pct_15d"] >= 0.05:
+                            self.state.setdefault("opportunity_pushed", {})[opp_key] = today_str
+                            alerts.append({"code": code, "kind": "opportunity", "price": price,
+                                           "text": "价格 {:.2f} 已远离买点 {:.2f}（+{:.1f}%），15d动量 {:.2%}，关注回踩机会".format(
+                                               price, ep["buy_high"], (price / ep["buy_high"] - 1) * 100,
+                                               mom["pct_15d"])})
+
+                # 买入区间内建仓
+                if ep["buy_low"] <= price <= ep["buy_high"]:
+                    budget = SIM_CAPITAL / len(SIM_PLANS)
+                    shares = int(budget // price // 100) * 100
+                    if shares:
+                        cost = shares * price
+                        self.state["cash"] -= cost
+                        self.state["positions"][code] = {
+                            "shares": shares,
+                            "buy_price": price,
+                            "buy_date": today,
+                            "tp1_done": False,
+                        }
+                        action = "买入 {} {} 股，成交价 {:.2f} 元".format(ep["name"], shares, price)
+                        self.record(action, code=code, action="buy", price=price, shares=shares,
+                                    value=cost, plan_version=self.state.get("plan_id", PLAN_ID))
+                        day_log["actions"].append(action)
+                        alerts.append({"code": code, "kind": "buy", "price": price, "text": action})
         day_log["quotes"] = quotes
         day_log["cash"] = self.state["cash"]
         day_log["asset"] = self.calculate_asset(quotes)
@@ -267,7 +428,7 @@ class SimulationTracker:
         if self.state["positions"]:
             parts.append("<p><b>当前持仓</b></p><table style='border-collapse:collapse'><tr><th>股票</th><th>股数</th><th>买入总金额</th><th>平均买入价</th><th>当前价格</th><th>当前市值</th><th>浮动盈亏</th><th>收益率</th></tr>")
             for code, position in self.state["positions"].items():
-                plan = SIM_PLANS[code]
+                plan = self.effective_plan(code)
                 price = quotes.get(code, {}).get("current", position["buy_price"])
                 cost = position["shares"] * position["buy_price"]
                 value = position["shares"] * price
@@ -278,7 +439,7 @@ class SimulationTracker:
             parts.append("</table>")
         else:
             parts.append("<p>当前无持仓，已投入资产：0.00 元。</p>")
-        parts.append("<p><b>后续计划</b>：未持仓股票等待进入买入区间；已有持仓按止损、止盈1卖半、止盈2清仓规则执行。</p>")
+        parts.append("<p><b>后续计划</b>：持仓标的按止损/止盈规则处理；止盈2清仓后本期不再用旧参数重建仓；止损清仓后48小时冷却；计划到期后重新筛选，有行情生成新买点，无行情持续观察至末期移除。</p>")
         parts.append("<p style='color:#aaa;font-size:12px'>仅为程序模拟，不会真实下单。</p></div>")
         def worker():
             try:
@@ -297,14 +458,18 @@ class SimulationTracker:
         kind_style = {
             "buy": ("模拟买入成交", "#16a34a"),
             "tp1": ("到达止盈1（卖出一半）", "#d97706"),
-            "tp2": ("到达止盈2（清仓）", "#0d9488"),
+            "tp2": ("到达止盈2/追踪止盈（清仓）", "#0d9488"),
             "stop": ("触发止损（清仓）", "#dc2626"),
+            "rescreen": ("到期重新筛选", "#3b82f6"),
+            "opportunity": ("大涨机会提示", "#8b5cf6"),
+            "expire": ("计划到期/移除", "#6b7280"),
         }
         # 标题一眼看出：什么股、什么操作、什么价
-        title_action = {"buy": "买入", "tp1": "止盈卖半", "tp2": "止盈清仓", "stop": "止损清仓"}
+        title_action = {"buy": "买入", "tp1": "止盈卖半", "tp2": "止盈清仓", "stop": "止损清仓",
+                        "rescreen": "重新筛选", "opportunity": "机会提示", "expire": "计划到期"}
 
         def one_line(ev):
-            name = SIM_PLANS[ev["code"]]["name"]
+            name = self.effective_plan(ev["code"])["name"]
             action = title_action.get(ev["kind"], "提醒")
             price = ev.get("price")
             return "{} {} @{:.2f}".format(name, action, price) if price else "{} {}".format(name, action)
@@ -319,7 +484,7 @@ class SimulationTracker:
                 dt.datetime.now().strftime("%Y-%m-%d %H:%M")),
         ]
         for ev in alerts:
-            plan = SIM_PLANS[ev["code"]]
+            plan = self.effective_plan(ev["code"])
             title, color = kind_style.get(ev["kind"], ("交易提醒", "#333"))
             parts.append("<hr style='border:none;border-top:1px solid #eee'>")
             parts.append("<h3 style='color:{};margin:8px 0 4px'>{} · {}</h3>".format(
@@ -331,19 +496,20 @@ class SimulationTracker:
             parts.append("<p style='margin:2px 0'>该股票浮盈：<b>{:+.2f} 元（{:+.2f}%）</b>；持仓市值：{:.2f} 元</p>".format(
                 ev.get("position_pnl", 0), ev.get("position_pnl_pct", 0), position_value))
             parts.append("<p style='margin:2px 0'>{}</p>".format(ev["text"]))
-            parts.append(
-                "<table style='border-collapse:collapse;margin:6px 0;font-size:13px'>"
-                "<tr><td style='padding:3px 14px;color:#888'>买入区间</td>"
-                "<td style='padding:3px 14px'><b>{low} - {high}</b></td></tr>"
-                "<tr><td style='padding:3px 14px;color:#888'>止损价</td>"
-                "<td style='padding:3px 14px;color:#dc2626'><b>{stop}</b></td></tr>"
-                "<tr><td style='padding:3px 14px;color:#888'>止盈1（卖一半）</td>"
-                "<td style='padding:3px 14px;color:#16a34a'><b>{tp1}</b></td></tr>"
-                "<tr><td style='padding:3px 14px;color:#888'>止盈2（清仓）</td>"
-                "<td style='padding:3px 14px;color:#16a34a'><b>{tp2}</b></td></tr>"
-                "</table>".format(
-                    low=plan["buy_low"], high=plan["buy_high"],
-                    stop=plan["stop"], tp1=plan["tp1"], tp2=plan["tp2"]))
+            if ev["kind"] in ("buy", "tp1", "tp2", "stop"):
+                parts.append(
+                    "<table style='border-collapse:collapse;margin:6px 0;font-size:13px'>"
+                    "<tr><td style='padding:3px 14px;color:#888'>买入区间</td>"
+                    "<td style='padding:3px 14px'><b>{low} - {high}</b></td></tr>"
+                    "<tr><td style='padding:3px 14px;color:#888'>止损价</td>"
+                    "<td style='padding:3px 14px;color:#dc2626'><b>{stop}</b></td></tr>"
+                    "<tr><td style='padding:3px 14px;color:#888'>止盈1（卖一半）</td>"
+                    "<td style='padding:3px 14px;color:#16a34a'><b>{tp1}</b></td></tr>"
+                    "<tr><td style='padding:3px 14px;color:#888'>止盈2（清仓）</td>"
+                    "<td style='padding:3px 14px;color:#16a34a'><b>{tp2}</b></td></tr>"
+                    "</table>".format(
+                        low=plan["buy_low"], high=plan["buy_high"],
+                        stop=plan["stop"], tp1=plan["tp1"], tp2=plan["tp2"]))
         parts.append("<hr style='border:none;border-top:1px solid #eee'>")
         total_asset = self.state.get("last_asset", 0)
         total_pnl = alerts[-1].get("total_pnl", total_asset - SIM_CAPITAL)
@@ -360,7 +526,7 @@ class SimulationTracker:
                 pnl = val - cost
                 pct = pnl / cost * 100 if cost else 0
                 parts.append("<tr><td style='padding:2px 10px'>{}</td><td style='padding:2px 10px'>{:.2f}</td><td style='padding:2px 10px'><b>{:+.2f}</b></td><td style='padding:2px 10px'>{:+.2f}%</td></tr>".format(
-                    SIM_PLANS.get(code, {}).get("name", code), val, pnl, pct))
+                    self.effective_plan(code)["name"], val, pnl, pct))
             parts.append("</table>")
         parts.append("<p style='color:#aaa;font-size:12px;margin:2px 0'>仅为程序模拟，不会真实下单，仅供研究参考</p>")
         parts.append("</div>")
@@ -406,7 +572,7 @@ class SimulationTracker:
         self.state["cash"] += proceeds
         position["shares"] -= shares
         action = "卖出 {} {} 股，成交价 {:.2f} 元，原因：{}，本笔盈亏 {:+.2f} 元".format(
-            SIM_PLANS[code]["name"], shares, price, reason, pnl)
+            self.effective_plan(code)["name"], shares, price, reason, pnl)
         self.record(action, code=code, action="sell", price=price, shares=shares,
                     value=proceeds, pnl=pnl, reason=reason,
                     plan_version=self.state.get("plan_id", PLAN_ID))
@@ -472,7 +638,7 @@ class SimulationTracker:
             pnl_total += pnl
             market_value += value
             # 对照计划给出当前状态，方便看偏差
-            plan = SIM_PLANS[code]
+            plan = self.effective_plan(code)
             plan_buy = (plan["buy_low"] + plan["buy_high"]) / 2
             if current <= plan["stop"]:
                 status = "已到止损位"
@@ -505,12 +671,13 @@ class SimulationTracker:
         expected_win = 0.0
         expected_loss = 0.0
         for code, plan in SIM_PLANS.items():
-            buy_mid = (plan["buy_low"] + plan["buy_high"]) / 2
+            ep = self.effective_plan(code)
+            buy_mid = (ep["buy_low"] + ep["buy_high"]) / 2
             shares = int(budget_each // buy_mid // 100) * 100
             # 止盈2的预期盈利：按"一半止盈1、一半止盈2"估算
             half = shares // 2
-            win = half * (plan["tp1"] - buy_mid) + (shares - half) * (plan["tp2"] - buy_mid)
-            loss = shares * (buy_mid - plan["stop"])
+            win = half * (ep["tp1"] - buy_mid) + (shares - half) * (ep["tp2"] - buy_mid)
+            loss = shares * (buy_mid - ep["stop"])
             expected_win += win
             expected_loss += loss
             plan_lines.append(
@@ -518,11 +685,11 @@ class SimulationTracker:
                 "| {stop:.2f}（{stop_pct:+.1f}%）"
                 " | {tp1:.2f}（{tp1_pct:+.1f}%） | {tp2:.2f}（{tp2_pct:+.1f}%）"
                 " | {shares} | 盈利约 {win:+.0f} 元 / 亏损约 {loss:.0f} 元 |".format(
-                    name=plan["name"], code=code[-6:],
-                    lo=plan["buy_low"], hi=plan["buy_high"], buy_mid=buy_mid,
-                    stop=plan["stop"], stop_pct=(plan["stop"] - buy_mid) / buy_mid * 100,
-                    tp1=plan["tp1"], tp1_pct=(plan["tp1"] - buy_mid) / buy_mid * 100,
-                    tp2=plan["tp2"], tp2_pct=(plan["tp2"] - buy_mid) / buy_mid * 100,
+                    name=ep["name"], code=code[-6:],
+                    lo=ep["buy_low"], hi=ep["buy_high"], buy_mid=buy_mid,
+                    stop=ep["stop"], stop_pct=(ep["stop"] - buy_mid) / buy_mid * 100,
+                    tp1=ep["tp1"], tp1_pct=(ep["tp1"] - buy_mid) / buy_mid * 100,
+                    tp2=ep["tp2"], tp2_pct=(ep["tp2"] - buy_mid) / buy_mid * 100,
                     shares=shares, win=win, loss=-loss))
 
         lines = [
@@ -550,25 +717,26 @@ class SimulationTracker:
             "|---|---:|---:|---:|---|",
         ])
         for code, plan in SIM_PLANS.items():
+            ep = self.effective_plan(code)
             quote = quotes.get(code)
             if not quote:
-                lines.append("| {} | {} | - | - | 暂无行情 |".format(plan["name"], code[-6:]))
+                lines.append("| {} | {} | - | - | 暂无行情 |".format(ep["name"], code[-6:]))
                 continue
             current = quote["current"]
-            if current <= plan["stop"]:
+            if current <= ep["stop"]:
                 status = "已到止损位"
-            elif current >= plan["tp2"]:
+            elif current >= ep["tp2"]:
                 status = "已到止盈2"
-            elif current >= plan["tp1"]:
+            elif current >= ep["tp1"]:
                 status = "已到止盈1"
-            elif current < plan["buy_low"]:
+            elif current < ep["buy_low"]:
                 status = "低于买入区间"
-            elif current <= plan["buy_high"]:
+            elif current <= ep["buy_high"]:
                 status = "买入区间内"
             else:
                 status = "高于买入区间，等回调"
             lines.append("| {} | {} | {:.2f} | {:+.2f}% | {} |".format(
-                plan["name"], code[-6:], current, quote["pct"], status))
+                ep["name"], code[-6:], current, quote["pct"], status))
         lines.extend([
             "",
             "## 当前持仓", "",
