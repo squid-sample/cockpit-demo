@@ -35,11 +35,11 @@ SIM_PLANS = PLAN_CONFIG["plans"]
 STOCK_STYLE_PROFILES = {
     "超短线": {
         "desc": "1-3天，抓短线爆发",
-        "atr_period": 10,           # 10天ATR
+        "atr_period": 20,           # 20天ATR（最少20天）
         "ema_short": 5,              # 5日EMA
-        "ema_long": 10,              # 10日EMA
+        "ema_long": 20,              # 20日EMA
         "rsi_period": 6,             # 6日RSI
-        "fib_lookback": 20,          # 20天高低点
+        "fib_lookback": 20,          # 20天高低点（最少20天）
         "stop_atr_mult": 1.0,        # 止损=1×ATR（A股有涨跌停限制，波动相对小）
         "tp1_atr_mult": 1.5,         # 止盈1=1.5×ATR
         "tp2_atr_mult": 2.5,         # 止盈2=2.5×ATR
@@ -49,11 +49,11 @@ STOCK_STYLE_PROFILES = {
     },
     "短线": {
         "desc": "1-2周，波段交易",
-        "atr_period": 14,
+        "atr_period": 20,           # 20天ATR（最少20天）
         "ema_short": 5,
         "ema_long": 20,
         "rsi_period": 14,
-        "fib_lookback": 30,
+        "fib_lookback": 30,          # 30天高低点
         "stop_atr_mult": 1.5,
         "tp1_atr_mult": 2.0,
         "tp2_atr_mult": 3.5,

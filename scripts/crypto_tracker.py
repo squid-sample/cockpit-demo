@@ -68,11 +68,11 @@ STYLE_PROFILES = {
     "超短线": {
         "desc": "1-3天，抓短线爆发",
         "kline_interval": "1h",    # 1小时K线
-        "atr_period": 24,           # 24小时
-        "ema_short": 12,            # 12小时EMA
-        "ema_long": 26,             # 26小时EMA
+        "atr_period": 24,           # 24小时ATR
+        "ema_short": 24,            # 24小时EMA
+        "ema_long": 48,             # 48小时EMA
         "rsi_period": 14,
-        "fib_lookback": 48,         # 48小时高低点
+        "fib_lookback": 480,        # 20天×24小时高低点（最少20天）
         "stop_atr_mult": 1.5,       # 止损=1.5×ATR
         "tp1_atr_mult": 2.0,        # 止盈1=2×ATR
         "tp2_atr_mult": 3.5,        # 止盈2=3.5×ATR
@@ -83,11 +83,11 @@ STYLE_PROFILES = {
     "短线": {
         "desc": "1-2周，波段交易",
         "kline_interval": "4h",     # 4小时K线
-        "atr_period": 30,           # 5天×6根
-        "ema_short": 20,
-        "ema_long": 50,
+        "atr_period": 30,           # 30根4h K线≈5天ATR
+        "ema_short": 30,            # 30根EMA
+        "ema_long": 90,             # 90根≈15天EMA
         "rsi_period": 14,
-        "fib_lookback": 60,
+        "fib_lookback": 120,        # 120根4h≈20天高低点（最少20天）
         "stop_atr_mult": 2.0,
         "tp1_atr_mult": 3.0,
         "tp2_atr_mult": 5.0,
@@ -98,11 +98,11 @@ STYLE_PROFILES = {
     "中线": {
         "desc": "1-3月，趋势跟踪",
         "kline_interval": "1d",     # 日线
-        "atr_period": 30,           # 30天
-        "ema_short": 20,
-        "ema_long": 50,
+        "atr_period": 30,           # 30天ATR
+        "ema_short": 30,            # 30日EMA
+        "ema_long": 60,             # 60日EMA
         "rsi_period": 14,
-        "fib_lookback": 90,
+        "fib_lookback": 90,         # 90天高低点（3个月）
         "stop_atr_mult": 3.0,
         "tp1_atr_mult": 5.0,
         "tp2_atr_mult": 8.0,
@@ -113,11 +113,11 @@ STYLE_PROFILES = {
     "长线": {
         "desc": "3-12月，长周期布局",
         "kline_interval": "1d",     # 日线（周线辅助确认）
-        "atr_period": 60,           # 60天
+        "atr_period": 60,           # 60天ATR
         "ema_short": 50,            # 50日EMA
         "ema_long": 120,            # 120日EMA
         "rsi_period": 14,
-        "fib_lookback": 180,
+        "fib_lookback": 365,        # 365天高低点（1年）
         "stop_atr_mult": 4.0,
         "tp1_atr_mult": 8.0,
         "tp2_atr_mult": 15.0,
