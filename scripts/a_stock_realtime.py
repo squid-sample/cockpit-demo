@@ -1028,6 +1028,10 @@ class SimulationTracker:
         losses = [t for t in trades if t.get("pnl", 0) < 0]
         profit = sum(t.get("pnl", 0) for t in wins)
         loss = sum(t.get("pnl", 0) for t in losses)
+        all_plans = dict(SIM_PLANS)
+        for code, dp in self.state.get("dynamic_plans", {}).items():
+            if code not in all_plans:
+                all_plans[code] = dp
         lines = ["## 周期复盘", "", "- 统计区间：{} 至 {}".format(start, end),
                  "- 完成卖出笔数：{}".format(len(trades)),
                  "- 盈利笔数/亏损笔数：{}/{}".format(len(wins), len(losses)),
