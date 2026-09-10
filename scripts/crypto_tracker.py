@@ -182,18 +182,36 @@ class CryptoTracker:
                     avg = pos["cost"] / pos["amount"] if pos["amount"] else 0
                     stop_price = max(plan["stop"], avg) if pos["tp1_done"] else plan["stop"]
                     if price <= stop_price:
+                        event_value = pos["amount"] * price
+                        event_pnl = event_value - pos["cost"]
+                        event_pnl_pct = event_pnl / pos["cost"] * 100 if pos["cost"] else 0
                         reason = "触发止损（{}），清仓".format(
                             "已上移到成本价" if pos["tp1_done"] else "破止损位")
                         msg = self.close(symbol, price, pos["amount"], reason)
-                        events.append({"symbol": symbol, "kind": "stop", "msg": msg})
+                        events.append({"symbol": symbol, "kind": "stop", "msg": msg,
+                                       "position_pnl": event_pnl,
+                                       "position_pnl_pct": event_pnl_pct,
+                                       "position_value": event_value})
                     elif not pos["tp1_done"] and price >= plan["tp1"]:
+                        event_value = pos["amount"] * price
+                        event_pnl = event_value - pos["cost"]
+                        event_pnl_pct = event_pnl / pos["cost"] * 100 if pos["cost"] else 0
                         half = pos["amount"] / 2
                         msg = self.sell(symbol, price, half, "到达止盈1，卖出一半，止损上移成本价")
-                        events.append({"symbol": symbol, "kind": "tp1", "msg": msg})
+                        events.append({"symbol": symbol, "kind": "tp1", "msg": msg,
+                                       "position_pnl": event_pnl,
+                                       "position_pnl_pct": event_pnl_pct,
+                                       "position_value": event_value})
                         self.state["positions"][symbol]["tp1_done"] = True
                     elif pos["tp1_done"] and price >= plan["tp2"]:
+                        event_value = pos["amount"] * price
+                        event_pnl = event_value - pos["cost"]
+                        event_pnl_pct = event_pnl / pos["cost"] * 100 if pos["cost"] else 0
                         msg = self.close(symbol, price, pos["amount"], "到达止盈2，清仓")
-                        events.append({"symbol": symbol, "kind": "tp2", "msg": msg})
+                        events.append({"symbol": symbol, "kind": "tp2", "msg": msg,
+                                       "position_pnl": event_pnl,
+                                       "position_pnl_pct": event_pnl_pct,
+                                       "position_value": event_value})
             elif self.state["plan_expired"].get(symbol):
                 # 计划已到期暂停，不再建仓
                 pass
@@ -220,6 +238,19 @@ class CryptoTracker:
                             msg = self.buy_tranche(symbol, price, i, tr, budget_each)
                             if msg:
                                 events.append({"symbol": symbol, "kind": "buy", "msg": msg})
+
+        for event in events:
+            position = self.state["positions"].get(event["symbol"])
+            if "position_pnl" not in event:
+                if position and position["amount"] and position["cost"]:
+                    event["position_value"] = position["amount"] * quotes[event["symbol"]]["price"]
+                    event["position_pnl"] = event["position_value"] - position["cost"]
+                    event["position_pnl_pct"] = event["position_pnl"] / position["cost"] * 100
+                else:
+                    event["position_value"] = 0.0
+                    event["position_pnl"] = 0.0
+                    event["position_pnl_pct"] = 0.0
+            event["total_pnl"] = self.total_asset(quotes) - SIM_CAPITAL
 
         self.save_state()
         self.write_report(quotes)
@@ -350,11 +381,11 @@ class CryptoTracker:
                 parts.append("<p style='margin:2px 0'>当前价格：<b>{:.4f} USDT</b>（24h {:+.2f}%）</p>".format(
                     price, quotes[ev["symbol"]]["pct24"]))
             pos = self.state["positions"].get(ev["symbol"])
-            if pos and pos["cost"]:
-                position_value = pos["amount"] * price
-                position_pnl = position_value - pos["cost"]
-                position_pnl_pct = position_pnl / pos["cost"] * 100
-                parts.append("<p style='margin:2px 0'>该币种当前浮盈：<b>{:+.2f} USDT（{:+.2f}%）</b>；持仓市值：{:.2f} USDT</p>".format(
+            if price is not None and (pos or "position_pnl" in ev):
+                position_value = ev.get("position_value", pos["amount"] * price if pos else 0)
+                position_pnl = ev.get("position_pnl", position_value - pos["cost"] if pos else 0)
+                position_pnl_pct = ev.get("position_pnl_pct", position_pnl / pos["cost"] * 100 if pos and pos["cost"] else 0)
+                parts.append("<p style='margin:2px 0'>该币种浮盈：<b>{:+.2f} USDT（{:+.2f}%）</b>；持仓市值：{:.2f} USDT</p>".format(
                     position_pnl, position_pnl_pct, position_value))
             parts.append("<p style='margin:2px 0'>{}</p>".format(ev["msg"]))
             budget_each = SIM_CAPITAL / len(PLANS)
@@ -378,7 +409,7 @@ class CryptoTracker:
                 "</table>".format(stop=plan["stop"], tp1=plan["tp1"], tp2=plan["tp2"]))
         parts.append("<hr style='border:none;border-top:1px solid #eee'>")
         parts.append("<p style='margin:4px 0'>账户总资产：<b>{:.2f} USDT</b>（浮动盈亏 {:+.2f}）</p>".format(
-            total, total - SIM_CAPITAL))
+            total, events[-1].get("total_pnl", total - SIM_CAPITAL)))
         parts.append("<p style='color:#aaa;font-size:12px;margin:2px 0'>仅为程序模拟，不会真实下单，仅供研究参考</p>")
         parts.append("</div>")
         return "".join(parts)

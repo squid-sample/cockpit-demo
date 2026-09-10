@@ -171,20 +171,41 @@ class SimulationTracker:
             price = quote["current"]
             if position:
                 if price <= plan["stop"]:
+                    event_value = position["shares"] * price
+                    event_cost = position["shares"] * position["buy_price"]
+                    event_pnl = event_value - event_cost
+                    event_pnl_pct = event_pnl / event_cost * 100 if event_cost else 0
                     action = self.sell(code, price, position["shares"], "止损")
                     day_log["actions"].append(action)
-                    alerts.append({"code": code, "kind": "stop", "price": price, "text": action})
+                    alerts.append({"code": code, "kind": "stop", "price": price, "text": action,
+                                   "position_pnl": event_pnl,
+                                   "position_pnl_pct": event_pnl_pct,
+                                   "position_value": event_value})
                 elif not position["tp1_done"] and price >= plan["tp1"]:
                     shares = position["shares"] // 2
                     if shares:
+                        event_value = position["shares"] * price
+                        event_cost = position["shares"] * position["buy_price"]
+                        event_pnl = event_value - event_cost
+                        event_pnl_pct = event_pnl / event_cost * 100 if event_cost else 0
                         action = self.sell(code, price, shares, "第一止盈")
                         day_log["actions"].append(action)
-                        alerts.append({"code": code, "kind": "tp1", "price": price, "text": action})
+                        alerts.append({"code": code, "kind": "tp1", "price": price, "text": action,
+                                       "position_pnl": event_pnl,
+                                       "position_pnl_pct": event_pnl_pct,
+                                       "position_value": event_value})
                         self.state["positions"][code]["tp1_done"] = True
                 elif position["tp1_done"] and price >= plan["tp2"]:
+                    event_value = position["shares"] * price
+                    event_cost = position["shares"] * position["buy_price"]
+                    event_pnl = event_value - event_cost
+                    event_pnl_pct = event_pnl / event_cost * 100 if event_cost else 0
                     action = self.sell(code, price, position["shares"], "第二止盈")
                     day_log["actions"].append(action)
-                    alerts.append({"code": code, "kind": "tp2", "price": price, "text": action})
+                    alerts.append({"code": code, "kind": "tp2", "price": price, "text": action,
+                                   "position_pnl": event_pnl,
+                                   "position_pnl_pct": event_pnl_pct,
+                                   "position_value": event_value})
             elif plan["buy_low"] <= price <= plan["buy_high"]:
                 budget = SIM_CAPITAL / len(SIM_PLANS)
                 shares = int(budget // price // 100) * 100
@@ -206,6 +227,19 @@ class SimulationTracker:
         day_log["cash"] = self.state["cash"]
         day_log["asset"] = self.calculate_asset(quotes)
         self.state["last_asset"] = day_log["asset"]
+        for alert in alerts:
+            position = self.state["positions"].get(alert["code"])
+            if "position_pnl" not in alert:
+                if position and position["shares"]:
+                    alert["position_value"] = position["shares"] * quotes[alert["code"]]["current"]
+                    cost = position["shares"] * position["buy_price"]
+                    alert["position_pnl"] = alert["position_value"] - cost
+                    alert["position_pnl_pct"] = alert["position_pnl"] / cost * 100 if cost else 0
+                else:
+                    alert["position_value"] = 0.0
+                    alert["position_pnl"] = 0.0
+                    alert["position_pnl_pct"] = 0.0
+            alert["total_pnl"] = self.calculate_asset(quotes) - SIM_CAPITAL
         if not day_log["actions"]:
             day_log["actions"].append("无交易")
         self.save_state()
@@ -291,14 +325,11 @@ class SimulationTracker:
             parts.append("<h3 style='color:{};margin:8px 0 4px'>{} · {}</h3>".format(
                 color, title, plan["name"]))
             position = self.state["positions"].get(ev["code"])
-            if position and position["shares"]:
-                current_price = ev.get("price", position["buy_price"])
-                position_cost = position["shares"] * position["buy_price"]
-                position_value = position["shares"] * current_price
-                position_pnl = position_value - position_cost
-                position_pnl_pct = position_pnl / position_cost * 100 if position_cost else 0
-                parts.append("<p style='margin:2px 0'>该股票当前浮盈：<b>{:+.2f} 元（{:+.2f}%）</b>；持仓市值：{:.2f} 元</p>".format(
-                    position_pnl, position_pnl_pct, position_value))
+            current_price = ev.get("price", position["buy_price"] if position else 0)
+            position_value = (position["shares"] * current_price if position else
+                              ev.get("position_value", 0))
+            parts.append("<p style='margin:2px 0'>该股票浮盈：<b>{:+.2f} 元（{:+.2f}%）</b>；持仓市值：{:.2f} 元</p>".format(
+                ev.get("position_pnl", 0), ev.get("position_pnl_pct", 0), position_value))
             parts.append("<p style='margin:2px 0'>{}</p>".format(ev["text"]))
             parts.append(
                 "<table style='border-collapse:collapse;margin:6px 0;font-size:13px'>"
@@ -314,8 +345,10 @@ class SimulationTracker:
                     low=plan["buy_low"], high=plan["buy_high"],
                     stop=plan["stop"], tp1=plan["tp1"], tp2=plan["tp2"]))
         parts.append("<hr style='border:none;border-top:1px solid #eee'>")
-        parts.append("<p style='margin:4px 0'>当前总资产：<b>{:.2f} 元</b></p>".format(
-            self.state.get("last_asset", 0)))
+        total_asset = self.state.get("last_asset", 0)
+        total_pnl = alerts[-1].get("total_pnl", total_asset - SIM_CAPITAL)
+        parts.append("<p style='margin:4px 0'>整体浮盈：<b>{:+.2f} 元</b></p>".format(total_pnl))
+        parts.append("<p style='margin:4px 0'>当前总资产：<b>{:.2f} 元</b></p>".format(total_asset))
         parts.append("<p style='color:#aaa;font-size:12px;margin:2px 0'>仅为程序模拟，不会真实下单，仅供研究参考</p>")
         parts.append("</div>")
         content = "".join(parts)
