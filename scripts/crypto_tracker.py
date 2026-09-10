@@ -365,18 +365,18 @@ class CryptoTracker:
                 parts.append("<p>当前无持仓，当前持仓投入：0.00 USDT。</p>")
             closed = self.closed_trade_records()
             if closed:
-                parts.append("<p><b>已清仓记录（已实现盈亏）</b></p><table style='border-collapse:collapse'><tr><th>时间</th><th>币种</th><th>卖出数量（枚）</th><th>卖出金额（USDT）</th><th>投入成本（USDT）</th><th>已实现浮盈/浮亏</th></tr>")
+                parts.append("<p><b>已清仓记录（已实现盈亏）</b></p><table style='border-collapse:collapse'><tr><th>时间</th><th>币种</th><th>卖出金额（USDT）</th><th>投入成本（USDT）</th><th>已实现浮盈/浮亏</th></tr>")
                 for trade in closed[-20:]:
                     cost = trade.get("cost", trade.get("value", 0) - trade.get("pnl", 0))
-                    parts.append("<tr><td>{}</td><td>{}</td><td>{:.6f}</td><td>{:.2f}</td><td>{:.2f}</td><td><b>{:+.2f} USDT</b></td></tr>".format(
+                    parts.append("<tr><td>{}</td><td>{}</td><td>{:.2f}</td><td>{:.2f}</td><td><b>{:+.2f} USDT</b></td></tr>".format(
                         trade.get("time", "-"), PLANS.get(trade.get("symbol"), {}).get("name", trade.get("symbol", "-")),
-                        trade.get("amount", 0), trade.get("value", 0), cost, trade.get("pnl", 0)))
+                        trade.get("value", 0), cost, trade.get("pnl", 0)))
                 parts.append("</table>")
             else:
                 parts.append("<p>暂无已清仓记录。</p>")
             parts.append("<p><b>后续计划</b>：按本期 plan.json 的分批买点执行；未持仓标的等待回踩买点，持仓标的按止损/止盈规则处理。</p>")
             parts.append("<p style='color:#aaa;font-size:12px'>仅为程序模拟，不会真实下单。</p></div>")
-            push_async("币·{}持仓汇总".format(label), "".join(parts))
+            push_async("币·{}持仓汇总（本金{:.0f}U）".format(label, SIM_CAPITAL), "".join(parts))
             self.state["summary_pushes"][marker] = now.strftime("%Y-%m-%d %H:%M")
         self.save_state()
 
