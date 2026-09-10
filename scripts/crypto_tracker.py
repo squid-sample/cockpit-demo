@@ -66,6 +66,155 @@ def fetch_klines(symbol, interval="1d", limit=30):
         return json.loads(resp.read().decode("utf-8"))
 
 
+# ====== 多时间框架技术分析 ======
+
+def calc_ema(closes, period):
+    """指数移动平均"""
+    if len(closes) < period:
+        return None
+    k = 2 / (period + 1)
+    ema = closes[0]
+    for c in closes[1:]:
+        ema = c * k + ema * (1 - k)
+    return ema
+
+
+def calc_atr(klines, period=30):
+    """30天ATR（真实波动幅度）"""
+    if len(klines) < period + 1:
+        period = len(klines) - 1
+    if period < 5:
+        return None
+    trs = []
+    for i in range(1, len(klines)):
+        k = klines[i]
+        prev_close = float(klines[i - 1][4])
+        high = float(k[2])
+        low = float(k[3])
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        trs.append(tr)
+    return sum(trs[-period:]) / period
+
+
+def calc_rsi(klines, period=14):
+    """RSI相对强弱指标"""
+    closes = [float(k[4]) for k in klines]
+    if len(closes) < period + 1:
+        return 50.0
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        change = closes[i] - closes[i - 1]
+        gains.append(max(change, 0))
+        losses.append(max(-change, 0))
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def calc_fibonacci(klines, lookback=60):
+    """斐波那契回调位：取最近一波行情的高低点"""
+    n = min(lookback, len(klines))
+    highs = [float(k[2]) for k in klines[-n:]]
+    lows = [float(k[3]) for k in klines[-n:]]
+    recent_high = max(highs)
+    recent_low = min(lows)
+    high_idx = n - 1 - highs[::-1].index(recent_high)
+    low_idx = n - 1 - lows[::-1].index(recent_low)
+    diff = recent_high - recent_low
+    if diff <= 0:
+        return None
+    direction = "up" if high_idx > low_idx else "down"
+    if direction == "up":
+        return {
+            "direction": "up", "high": recent_high, "low": recent_low,
+            "0.236": recent_high - diff * 0.236,
+            "0.382": recent_high - diff * 0.382,
+            "0.5": recent_high - diff * 0.5,
+            "0.618": recent_high - diff * 0.618,
+            "0.786": recent_high - diff * 0.786,
+        }
+    else:
+        return {
+            "direction": "down", "high": recent_high, "low": recent_low,
+            "0.236": recent_low + diff * 0.236,
+            "0.382": recent_low + diff * 0.382,
+            "0.5": recent_low + diff * 0.5,
+            "0.618": recent_low + diff * 0.618,
+            "0.786": recent_low + diff * 0.786,
+        }
+
+
+def find_swing_levels(klines, lookback=20):
+    """识别关键支撑阻力位"""
+    highs = [float(k[2]) for k in klines[-lookback:]]
+    lows = [float(k[3]) for k in klines[-lookback:]]
+    return {
+        "resistance": max(highs),
+        "support": min(lows),
+        "swing_highs": sorted(set(highs), reverse=True)[:3],
+        "swing_lows": sorted(set(lows))[:3],
+    }
+
+
+def detect_candle_patterns(klines):
+    """裸K形态识别"""
+    if len(klines) < 3:
+        return []
+    patterns = []
+    k = klines[-1]
+    prev = klines[-2]
+    o, h, l, c = float(k[1]), float(k[2]), float(k[3]), float(k[4])
+    po, ph, pl, pc = float(prev[1]), float(prev[2]), float(prev[3]), float(prev[4])
+    body = abs(o - c)
+    upper_wick = h - max(o, c)
+    lower_wick = min(o, c) - l
+    range_total = h - l
+    if range_total <= 0:
+        return []
+    # 看涨Pin bar（长下影线）
+    if lower_wick > body * 2 and lower_wick > upper_wick * 2:
+        patterns.append("看涨Pin bar")
+    # 看跌Pin bar（长上影线）
+    if upper_wick > body * 2 and upper_wick > lower_wick * 2:
+        patterns.append("看跌Pin bar")
+    # 看涨吞没
+    if c > po and o < pc and c > o and pc < po:
+        patterns.append("看涨吞没")
+    # 看跌吞没
+    if c < po and o > pc and c < o and pc > po:
+        patterns.append("看跌吞没")
+    # 锤子线（底部反转）
+    if lower_wick > body * 2 and upper_wick < body * 0.5:
+        patterns.append("锤子线")
+    # 射击之星（顶部反转）
+    if upper_wick > body * 2 and lower_wick < body * 0.5:
+        patterns.append("射击之星")
+    return patterns
+
+
+def analyze_trend(klines):
+    """判断趋势方向：bull/bear/range"""
+    closes = [float(k[4]) for k in klines]
+    if len(closes) < 20:
+        return "unknown"
+    ema20 = calc_ema(closes, 20)
+    current = closes[-1]
+    if not ema20:
+        return "unknown"
+    if len(closes) >= 50:
+        ema50 = calc_ema(closes, 50)
+        if ema50 and ema20 > ema50 and current > ema20:
+            return "bull"
+        if ema50 and ema20 < ema50 and current < ema20:
+            return "bear"
+    if current > ema20:
+        return "bull_weak"
+    return "range"
+
+
 def calc_momentum(symbol):
     try:
         k15 = fetch_klines(symbol, "1d", 16)
@@ -77,19 +226,161 @@ def calc_momentum(symbol):
         return {"pct_15d": 0.0, "pct_30d": 0.0}
 
 
+def check_btc_crash():
+    """BTC暴跌过滤器：20日EMA 5天内跌幅>5%才拦截，盘整不拦"""
+    try:
+        klines = fetch_klines("BTCUSDT", "1d", 50)
+        closes = [float(k[4]) for k in klines]
+        if len(closes) < 25:
+            return False
+        ema20_now = calc_ema(closes, 20)
+        ema20_5ago = calc_ema(closes[:-5], 20)
+        if not ema20_now or not ema20_5ago or ema20_5ago <= 0:
+            return False
+        slope = (ema20_now - ema20_5ago) / ema20_5ago
+        return slope < -0.05
+    except Exception:
+        return False
+
+
+def analyze_symbol(symbol):
+    """综合多时间框架技术分析，生成建仓计划"""
+    try:
+        daily = fetch_klines(symbol, "1d", 60)
+        weekly = fetch_klines(symbol, "1w", 26)
+        monthly = fetch_klines(symbol, "1M", 12)
+    except Exception:
+        return None
+    if not daily or len(daily) < 30:
+        return None
+
+    current_price = float(daily[-1][4])
+    atr = calc_atr(daily, 30)
+    rsi = calc_rsi(daily, 14)
+    fib = calc_fibonacci(daily)
+    swings = find_swing_levels(daily)
+    patterns = detect_candle_patterns(daily)
+    trend_d = analyze_trend(daily)
+    trend_w = analyze_trend(weekly) if weekly and len(weekly) >= 20 else "unknown"
+    trend_m = analyze_trend(monthly) if monthly and len(monthly) >= 10 else "unknown"
+
+    if not atr or atr <= 0:
+        return None
+
+    atr_pct = atr / current_price
+
+    # 买点：斐波那契0.382-0.618回调区间，或ATR回撤
+    if fib and fib["direction"] == "up":
+        buy_zone_high = fib["0.382"]
+        buy_zone_low = fib["0.618"]
+    else:
+        buy_zone_high = current_price * (1 - atr_pct)
+        buy_zone_low = current_price * (1 - atr_pct * 2)
+
+    # 止损：斐波那契0.786下方 或 入场价-2×ATR（取较低者更安全）
+    if fib:
+        stop = min(fib["0.786"], buy_zone_low - atr * 0.5)
+    else:
+        stop = buy_zone_low - atr * 0.5
+
+    # 止盈：基于ATR
+    tp1 = current_price + atr * 3
+    tp2 = current_price + atr * 5
+
+    # 分批买点
+    tranche1 = round_price(buy_zone_high)
+    tranche2 = round_price((buy_zone_high + buy_zone_low) / 2)
+    tranche3 = round_price(buy_zone_low)
+
+    # 趋势评分：多时间框架对齐
+    trend_score = 0
+    if trend_m == "bull":
+        trend_score += 3
+    elif trend_m == "bull_weak":
+        trend_score += 1
+    if trend_w == "bull":
+        trend_score += 2
+    elif trend_w == "bull_weak":
+        trend_score += 1
+    if trend_d == "bull":
+        trend_score += 2
+    elif trend_d == "bull_weak":
+        trend_score += 1
+
+    # 是否适合建仓
+    can_buy = (
+        trend_d not in ("bear",) and
+        trend_w not in ("bear",) and
+        trend_score >= 2 and
+        rsi < 65  # 不在严重超买区追高
+    )
+
+    has_bullish_pattern = any(p in ("看涨Pin bar", "看涨吞没", "锤子线") for p in patterns)
+
+    return {
+        "current_price": current_price,
+        "atr": atr,
+        "atr_pct": atr_pct,
+        "rsi": rsi,
+        "trend": {"daily": trend_d, "weekly": trend_w, "monthly": trend_m},
+        "trend_score": trend_score,
+        "fibonacci": fib,
+        "swings": swings,
+        "patterns": patterns,
+        "can_buy": can_buy,
+        "has_bullish_pattern": has_bullish_pattern,
+        "buy_zone": {"high": buy_zone_high, "low": buy_zone_low},
+        "tranches": [
+            {"price": tranche1, "pct": 0.5},
+            {"price": tranche2, "pct": 0.3},
+            {"price": tranche3, "pct": 0.2},
+        ],
+        "stop": round_price(stop),
+        "tp1": round_price(tp1),
+        "tp2": round_price(tp2),
+    }
+
+
 def generate_dynamic_plan(symbol, current_price, name, logic=""):
+    """基于综合技术分析生成动态计划"""
+    analysis = analyze_symbol(symbol)
+    if analysis:
+        return {
+            "name": name,
+            "tranches": analysis["tranches"],
+            "stop": analysis["stop"],
+            "tp1": analysis["tp1"],
+            "tp2": analysis["tp2"],
+            "logic": "多时间框架分析：日线{} 周线{} 月线{}；ATR {:.4f}({:.2%})；RSI {:.1f}；斐波那契{}；裸K{}；{}".format(
+                analysis["trend"]["daily"], analysis["trend"]["weekly"], analysis["trend"]["monthly"],
+                analysis["atr"], analysis["atr_pct"], analysis["rsi"],
+                "回调" + analysis["fibonacci"]["direction"] if analysis["fibonacci"] else "无",
+                "/".join(analysis["patterns"]) if analysis["patterns"] else "无明显形态",
+                logic),
+            "start_date": dt.date.today().isoformat(),
+            "atr": analysis["atr"],
+            "trend_score": analysis["trend_score"],
+        }
+    # 降级：用简单ATR
+    try:
+        klines = fetch_klines(symbol, "1d", 35)
+        atr = calc_atr(klines, 30) or current_price * 0.05
+    except Exception:
+        atr = current_price * 0.05
     return {
         "name": name,
         "tranches": [
-            {"price": round_price(current_price * 0.97), "pct": 0.5},
-            {"price": round_price(current_price * 0.95), "pct": 0.3},
-            {"price": round_price(current_price * 0.93), "pct": 0.2},
+            {"price": round_price(current_price - atr), "pct": 0.5},
+            {"price": round_price(current_price - atr * 1.5), "pct": 0.3},
+            {"price": round_price(current_price - atr * 2), "pct": 0.2},
         ],
-        "stop": round_price(current_price * 0.91),
-        "tp1": round_price(current_price * 1.08),
-        "tp2": round_price(current_price * 1.15),
-        "logic": "动态重新筛选：" + logic,
+        "stop": round_price(current_price - atr * 2.5),
+        "tp1": round_price(current_price + atr * 3),
+        "tp2": round_price(current_price + atr * 5),
+        "logic": "降级ATR计划：" + logic,
         "start_date": dt.date.today().isoformat(),
+        "atr": atr,
+        "trend_score": 0,
     }
 
 
@@ -296,6 +587,9 @@ class CryptoTracker:
         else:
             quotes = self.state.get("last_quotes", {})
 
+        # BTC暴跌过滤器：盘整不拦，只有暴跌才拦
+        btc_crashing = check_btc_crash()
+
         events = []
         budget_each = SIM_CAPITAL / len(PLANS)
         now = dt.datetime.now()
@@ -404,16 +698,17 @@ class CryptoTracker:
                 if self.state["plan_expired"].get(symbol):
                     continue
 
+                # BTC暴跌时只卖不买
+                if btc_crashing:
+                    continue
+
                 days = (dt.date.today() - dt.date.fromisoformat(ep.get("start_date") or self.state["start_date"])).days
                 buy_high = ep["tranches"][0]["price"]
 
-                # 计划到期：重新跑动量筛选
+                # 计划到期：用多时间框架重新分析
                 if days >= PLAN_VALID_DAYS:
-                    mom = calc_momentum(symbol)
-                    has_momentum = (mom["pct_15d"] >= MOMENTUM_15D_MIN or
-                                    mom["pct_30d"] >= MOMENTUM_30D_MIN)
-
-                    if has_momentum:
+                    analysis = analyze_symbol(symbol)
+                    if analysis and analysis["can_buy"]:
                         if not self.state.get("rescreened", {}).get(symbol):
                             new_plan = generate_dynamic_plan(
                                 symbol, price, plan["name"], plan.get("logic", ""))
@@ -423,20 +718,21 @@ class CryptoTracker:
                             buy_high = ep["tranches"][0]["price"]
                             events.append({
                                 "symbol": symbol, "kind": "rescreen",
-                                "msg": "计划到期重新筛选：15d动量 {pct_15d:+.2%}，30d动量 {pct_30d:+.2%}，已生成新买点 @{price:.4f}（买点 {bp1:.4f}/{bp2:.4f}/{bp3:.4f}，止损 {stop:.4f}，止盈 {tp1:.4f}/{tp2:.4f}）".format(
-                                    pct_15d=mom["pct_15d"], pct_30d=mom["pct_30d"], price=price,
-                                    bp1=ep["tranches"][0]["price"], bp2=ep["tranches"][1]["price"],
-                                    bp3=ep["tranches"][2]["price"], stop=ep["stop"],
-                                    tp1=ep["tp1"], tp2=ep["tp2"])})
-                    else:
-                        # 无行情：末期才移除，否则持续观察
+                                "msg": "到期重新分析：日线{} 周线{} 月线{}；ATR {:.4f}({:.2%})；RSI {:.1f}；趋势评分{}；已生成新买点（{}/{}/{}, 止损{}, 止盈{}/{}, {}）".format(
+                                    analysis["trend"]["daily"], analysis["trend"]["weekly"], analysis["trend"]["monthly"],
+                                    analysis["atr"], analysis["atr_pct"], analysis["rsi"], analysis["trend_score"],
+                                    ep["tranches"][0]["price"], ep["tranches"][1]["price"], ep["tranches"][2]["price"],
+                                    ep["stop"], ep["tp1"], ep["tp2"],
+                                    "看涨形态:" + "/".join(analysis["patterns"]) if analysis["patterns"] else "无明显形态")})
+                    elif analysis and not analysis["can_buy"]:
                         if days >= PLAN_VALID_DAYS + EXTENDED_OBSERVATION_DAYS:
                             self.state["plan_expired"][symbol] = True
                             events.append({
                                 "symbol": symbol, "kind": "expire",
-                                "msg": "计划到期后持续观察 {} 天仍无行情（15d {pct_15d:+.2%}，30d {pct_30d:+.2%}），移出本期".format(
+                                "msg": "到期后持续观察 {} 天，趋势评分{}（日线{} 周线{} 月线{}），不适合建仓，移出本期".format(
                                     EXTENDED_OBSERVATION_DAYS,
-                                    pct_15d=mom["pct_15d"], pct_30d=mom["pct_30d"])})
+                                    analysis["trend_score"],
+                                    analysis["trend"]["daily"], analysis["trend"]["weekly"], analysis["trend"]["monthly"])})
                             self.try_replacement(symbol, plan["name"], events)
                             continue
                         else:
@@ -446,8 +742,32 @@ class CryptoTracker:
                                 self.state.setdefault("opportunity_pushed", {})[observe_key] = today_str
                                 events.append({
                                     "symbol": symbol, "kind": "rescreen",
-                                    "msg": "计划到期但暂无行情（15d {pct_15d:+.2%}，30d {pct_30d:+.2%}），持续观察中（第 {day} 天）".format(
-                                        pct_15d=mom["pct_15d"], pct_30d=mom["pct_30d"], day=days)})
+                                    "msg": "到期但暂不适合建仓（趋势评分{}，日线{} 周线{} RSI {:.1f}），持续观察中（第 {} 天）".format(
+                                        analysis["trend_score"],
+                                        analysis["trend"]["daily"], analysis["trend"]["weekly"],
+                                        analysis["rsi"], days)})
+                            continue
+                    else:
+                        # 分析失败，退回动量筛选
+                        mom = calc_momentum(symbol)
+                        has_momentum = (mom["pct_15d"] >= MOMENTUM_15D_MIN or
+                                        mom["pct_30d"] >= MOMENTUM_30D_MIN)
+                        if has_momentum:
+                            if not self.state.get("rescreened", {}).get(symbol):
+                                new_plan = generate_dynamic_plan(
+                                    symbol, price, plan["name"], plan.get("logic", ""))
+                                self.state.setdefault("dynamic_plans", {})[symbol] = new_plan
+                                self.state.setdefault("rescreened", {})[symbol] = True
+                                ep = new_plan
+                                buy_high = ep["tranches"][0]["price"]
+                        else:
+                            if days >= PLAN_VALID_DAYS + EXTENDED_OBSERVATION_DAYS:
+                                self.state["plan_expired"][symbol] = True
+                                events.append({
+                                    "symbol": symbol, "kind": "expire",
+                                    "msg": "到期后持续观察 {} 天仍无行情，移出本期".format(EXTENDED_OBSERVATION_DAYS)})
+                                self.try_replacement(symbol, plan["name"], events)
+                                continue
                             continue
 
                 # 未建仓就跌破止损位：计划作废
@@ -465,20 +785,37 @@ class CryptoTracker:
                     today_str = now.date().isoformat()
                     opp_key = symbol + "_opp"
                     if self.state.get("opportunity_pushed", {}).get(opp_key) != today_str:
-                        mom = calc_momentum(symbol)
-                        if mom["pct_15d"] >= MOMENTUM_15D_MIN:
+                        analysis = analyze_symbol(symbol)
+                        if analysis and analysis["trend_score"] >= 2:
                             self.state.setdefault("opportunity_pushed", {})[opp_key] = today_str
                             events.append({
                                 "symbol": symbol, "kind": "opportunity",
-                                "msg": "价格 {:.4f} 已远离买点 {:.4f}（+{:.1f}%），15d动量 {:+.2%}，关注回踩机会".format(
-                                    price, buy_high, (price / buy_high - 1) * 100, mom["pct_15d"])})
+                                "msg": "价格 {:.4f} 已远离买点 {:.4f}（+{:.1f}%），趋势评分{}（日线{} 周线{}），RSI {:.1f}，关注回踩机会".format(
+                                    price, buy_high, (price / buy_high - 1) * 100,
+                                    analysis["trend_score"],
+                                    analysis["trend"]["daily"], analysis["trend"]["weekly"],
+                                    analysis["rsi"])})
 
-                # 按分批买点建仓
-                for i, tr in enumerate(ep["tranches"]):
-                    if price <= tr["price"]:
-                        msg = self.buy_tranche(symbol, price, i, tr, budget_each)
-                        if msg:
-                            events.append({"symbol": symbol, "kind": "buy", "msg": msg})
+                # 按分批买点建仓（仅当多时间框架允许建仓时）
+                analysis = analyze_symbol(symbol)
+                if analysis and analysis["can_buy"]:
+                    for i, tr in enumerate(ep["tranches"]):
+                        if price <= tr["price"]:
+                            msg = self.buy_tranche(symbol, price, i, tr, budget_each)
+                            if msg:
+                                events.append({"symbol": symbol, "kind": "buy", "msg": msg})
+                else:
+                    # 趋势不允许建仓时，推送提示（每天最多1条）
+                    today_str = now.date().isoformat()
+                    block_key = symbol + "_block"
+                    if analysis and self.state.get("opportunity_pushed", {}).get(block_key) != today_str:
+                        self.state.setdefault("opportunity_pushed", {})[block_key] = today_str
+                        events.append({
+                            "symbol": symbol, "kind": "opportunity",
+                            "msg": "价格在买点区间但趋势不允许建仓（评分{}，日线{} 周线{}，RSI {:.1f}），等待趋势确认".format(
+                                analysis["trend_score"],
+                                analysis["trend"]["daily"], analysis["trend"]["weekly"],
+                                analysis["rsi"])})
 
         for event in events:
             position = self.state["positions"].get(event["symbol"])
