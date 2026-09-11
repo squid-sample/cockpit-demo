@@ -20,6 +20,7 @@ STATE_FILE = os.path.join(PLAN_DIR, "state.json")
 REPORT_FILE = os.path.join(PLAN_DIR, "report.md")
 REPORT_ARCHIVE_DIR = os.path.join(BASE_DIR, "crypto_reports")
 REVIEW_DIR = os.path.join(BASE_DIR, "crypto_reviews")
+SUMMARY_LOCK_DIR = os.path.join(BASE_DIR, "summary_locks")
 SIM_CAPITAL = float(PLAN_CONFIG["capital"])
 PUSHPLUS_TOKEN = "e39674189a874c48888292f80e0c3464"
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
@@ -554,6 +555,19 @@ def push_async(title, content):
 class CryptoTracker:
     def __init__(self):
         self.state = self.load_state()
+
+        # 启动独立定时线程（方案3）：只在09:00和17:50触发推送
+        threading.Thread(target=self._scheduled_worker, daemon=True).start()
+
+    def _scheduled_worker(self):
+        """独立定时线程，到点后只触发一次汇总推送"""
+        while True:
+            try:
+                quotes = self.state.get("last_quotes", {})
+                self.push_scheduled_summary(quotes)
+            except Exception as e:
+                print("[定时线程] 推送异常: {}".format(e))
+            time.sleep(60)
 
     def load_state(self):
         if os.path.exists(STATE_FILE):
@@ -1127,7 +1141,6 @@ class CryptoTracker:
 
         self.save_state()
         self.write_report(quotes)
-        self.push_scheduled_summary(quotes)
         self.check_monthly_review()
         if events:
             content = self.build_push_html(events, quotes)
@@ -1211,6 +1224,17 @@ class CryptoTracker:
             if trade.get("action") == "sell" and "清仓" in trade.get("reason", "")
         ]
 
+    def claim_summary_push(self, marker):
+        os.makedirs(SUMMARY_LOCK_DIR, exist_ok=True)
+        lock_file = os.path.join(SUMMARY_LOCK_DIR, "crypto_{}.lock".format(marker))
+        try:
+            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            return True
+        except FileExistsError:
+            return False
+
     def push_scheduled_summary(self, quotes):
         now = dt.datetime.now()
         slots = ((dt.time(9, 0), "morning", "早间"), (dt.time(17, 50), "evening", "晚间"))
@@ -1218,6 +1242,8 @@ class CryptoTracker:
         for target, key, label in slots:
             marker = "{}-{}".format(today, key)
             if now.time() < target or self.state["summary_pushes"].get(marker):
+                continue
+            if not self.claim_summary_push(marker):
                 continue
             total = self.total_asset(quotes)
             invested = sum(pos["cost"] for pos in self.state["positions"].values())

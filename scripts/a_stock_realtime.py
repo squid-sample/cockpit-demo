@@ -505,6 +505,16 @@ class SimulationTracker:
         self.root = root
         self.state = self.load_state()
         self.poll()
+        self.root.after(1000, self._scheduled_summary_worker)
+
+    def _scheduled_summary_worker(self):
+        """独立定时回调，到点后只触发一次收盘汇总"""
+        try:
+            self.push_scheduled_summary(self.state.get("last_quotes", {}))
+        except Exception as exc:
+            self.record("定时汇总异常：{}".format(exc))
+            self.save_state()
+        self.root.after(60000, self._scheduled_summary_worker)
 
     def load_state(self):
         if os.path.exists(SIM_STATE_FILE):
@@ -594,7 +604,6 @@ class SimulationTracker:
         elif self.state["start_date"]:
             quotes = self.state.get("last_quotes", {})
             self.write_report(quotes)
-            self.push_scheduled_summary(quotes)
         self.check_monthly_review()
         self.root.after(SIM_POLL_MS, self.poll)
 
@@ -839,16 +848,28 @@ class SimulationTracker:
             day_log["actions"].append("无交易")
         self.save_state()
         self.write_report(quotes)
-        self.push_scheduled_summary(quotes)
         if alerts:
             self.show_trade_popup(alerts)
             self.push_trade_alerts(alerts)
+
+    def claim_summary_push(self, marker):
+        os.makedirs(SUMMARY_LOCK_DIR, exist_ok=True)
+        lock_file = os.path.join(SUMMARY_LOCK_DIR, "stock_{}.lock".format(marker))
+        try:
+            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
+                file.write(dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            return True
+        except FileExistsError:
+            return False
 
     def push_scheduled_summary(self, quotes):
         now = dt.datetime.now()
         target = dt.time(15, 5)
         marker = "{}-close".format(now.date().isoformat())
         if now.time() < target or self.state["summary_pushes"].get(marker):
+            return
+        if not self.claim_summary_push(marker):
             return
         total = self.calculate_asset(quotes)
         invested = sum(position["shares"] * position["buy_price"] for position in self.state["positions"].values())
