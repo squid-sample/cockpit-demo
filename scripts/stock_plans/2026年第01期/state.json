@@ -3,17 +3,11 @@
   "plan_id": "2026年第01期",
   "plan_date": "2026-09-07",
   "end_date": "2026-10-09",
-  "cash": 37414.0,
+  "cash": 68164.0,
   "positions": {
     "sh603259": {
       "shares": 200,
       "buy_price": 152.93,
-      "buy_date": "2026-09-10",
-      "tp1_done": false
-    },
-    "sh601138": {
-      "shares": 500,
-      "buy_price": 64.0,
       "buy_date": "2026-09-10",
       "tp1_done": false
     }
@@ -42,6 +36,134 @@
       "shares": 500,
       "value": 32000.0,
       "plan_version": "2026年第01期"
+    },
+    {
+      "date": "2026-09-14 13:51",
+      "text": "卖出 工业富联 500 股，成交价 61.50 元，原因：止损，本笔盈亏 -1250.00 元",
+      "code": "sh601138",
+      "action": "sell",
+      "price": 61.5,
+      "shares": 500,
+      "value": 30750.0,
+      "pnl": -1250.0,
+      "reason": "止损",
+      "plan_version": "2026年第01期"
+    },
+    {
+      "date": "2026-09-14 15:05",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:06",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:07",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:08",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:09",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:10",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:11",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:12",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:13",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:14",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:15",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:16",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:17",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:18",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:19",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:20",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:21",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:22",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:23",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:24",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:25",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:26",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:27",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:28",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:29",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:30",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:31",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:32",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
+    },
+    {
+      "date": "2026-09-14 15:33",
+      "text": "定时汇总异常：name 'SUMMARY_LOCK_DIR' is not defined"
     }
   ],
   "daily": [
@@ -101,38 +223,128 @@
       },
       "cash": 37414.0,
       "asset": 100267.0
+    },
+    {
+      "date": "2026-09-11",
+      "actions": [
+        "无交易"
+      ],
+      "quotes": {
+        "sh601138": {
+          "code": "sh601138",
+          "current": 63.45,
+          "change": -0.45999999999999375,
+          "pct": -0.7197621655452884
+        },
+        "sh601899": {
+          "code": "sh601899",
+          "current": 31.86,
+          "change": -2.25,
+          "pct": -6.596306068601583
+        },
+        "sh603259": {
+          "code": "sh603259",
+          "current": 151.91,
+          "change": -2.5900000000000034,
+          "pct": -1.6763754045307464
+        }
+      },
+      "cash": 37414.0,
+      "asset": 99521.0
+    },
+    {
+      "date": "2026-09-14",
+      "actions": [
+        "卖出 工业富联 500 股，成交价 61.50 元，原因：止损，本笔盈亏 -1250.00 元"
+      ],
+      "quotes": {
+        "sh601138": {
+          "code": "sh601138",
+          "current": 61.61,
+          "change": -2.4599999999999937,
+          "pct": -3.8395504916497485
+        },
+        "sh601899": {
+          "code": "sh601899",
+          "current": 32.27,
+          "change": 0.010000000000005116,
+          "pct": 0.030998140111609163
+        },
+        "sh603259": {
+          "code": "sh603259",
+          "current": 158.84,
+          "change": 7.599999999999994,
+          "pct": 5.0251256281406995
+        }
+      },
+      "cash": 68164.0,
+      "asset": 99932.0
+    },
+    {
+      "date": "2026-09-16",
+      "actions": [
+        "无交易"
+      ],
+      "quotes": {
+        "sh601138": {
+          "code": "sh601138",
+          "current": 62.33,
+          "change": 1.5300000000000011,
+          "pct": 2.5164473684210544
+        },
+        "sh601899": {
+          "code": "sh601899",
+          "current": 32.19,
+          "change": 0.509999999999998,
+          "pct": 1.6098484848484786
+        },
+        "sh603259": {
+          "code": "sh603259",
+          "current": 157.71,
+          "change": 1.0400000000000205,
+          "pct": 0.6638156634965344
+        }
+      },
+      "cash": 68164.0,
+      "asset": 99706.0
     }
   ],
   "last_quotes": {
     "sh601138": {
       "code": "sh601138",
-      "current": 63.91,
-      "change": -1.3299999999999983,
-      "pct": -2.0386266094420575
+      "current": 62.33,
+      "change": 1.5300000000000011,
+      "pct": 2.5164473684210544
     },
     "sh601899": {
       "code": "sh601899",
-      "current": 34.11,
-      "change": -0.28999999999999915,
-      "pct": -0.843023255813951
+      "current": 32.19,
+      "change": 0.509999999999998,
+      "pct": 1.6098484848484786
     },
     "sh603259": {
       "code": "sh603259",
-      "current": 154.49,
-      "change": -0.38999999999998636,
-      "pct": -0.2518078512396606
+      "current": 157.71,
+      "change": 1.0400000000000205,
+      "pct": 0.6638156634965344
     }
   },
-  "last_asset": 100267.0,
+  "last_asset": 99706.0,
   "summary_pushes": {
     "2026-09-09-close": "2026-09-09 15:31",
-    "2026-09-10-close": "2026-09-10 16:14"
+    "2026-09-10-close": "2026-09-10 16:14",
+    "2026-09-16-close": "2026-09-16 15:05"
   },
-  "cooldown": {},
+  "cooldown": {
+    "sh601138": "2026-09-16 13:51"
+  },
   "cycle_done": {},
   "dynamic_plans": {},
-  "opportunity_pushed": {},
+  "opportunity_pushed": {
+    "sh601899_block": "2026-09-16"
+  },
   "rescreened": {},
   "replacements": {},
-  "plan_expired": {}
+  "plan_expired": {},
+  "review_pushed": {}
 }

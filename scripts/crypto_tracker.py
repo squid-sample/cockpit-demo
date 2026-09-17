@@ -4,6 +4,8 @@
 import datetime as dt
 import json
 import os
+import socket
+import sys
 import threading
 import time
 import urllib.parse
@@ -33,6 +35,8 @@ PLANS = PLAN_CONFIG["plans"]
 COOLDOWN_HOURS = 48          # 止损清仓后冷却小时数
 OPPORTUNITY_THRESHOLD = 0.10 # 未建仓但远离买点10%触发机会提示
 EXTENDED_OBSERVATION_DAYS = 5  # 到期后持续观察天数
+MAX_ATR_PCT = 0.12           # ATR/现价高于12%的高波动标的不建仓（LSK闪崩教训）
+GAP_VOID_PCT = 0.08          # 未建仓时现价低于第三批买点超8%即判定跳空过深，计划作废
 
 # 稳定币和杠杆代币排除
 STABLECOINS = {"USDCUSDT", "BUSDUSDT", "FDUSDUSDT", "TUSDUSDT", "DAIUSDT", "USDPUSDT", "EURUSDT"}
@@ -405,7 +409,8 @@ def analyze_symbol(symbol):
         trend_d not in ("bear",) and
         trend_w not in ("bear",) and
         trend_score >= 2 and
-        rsi < 65  # 不在严重超买区追高
+        rsi < 65 and  # 不在严重超买区追高
+        atr_pct <= MAX_ATR_PCT  # 高波动标的（ATR>12%）不碰，防闪崩中重仓接刀
     )
 
     has_bullish_pattern = any(p in ("看涨Pin bar", "看涨吞没", "锤子线") for p in patterns)
@@ -508,7 +513,8 @@ def screen_new_crypto_candidate(exclude_symbols):
         # 取前10名做综合分析
         for c in candidates[:10]:
             analysis = analyze_symbol(c["symbol"])
-            if analysis and analysis["trend_score"] >= 2:
+            # 替换选币与正常建仓同门槛：趋势评分+RSI+ATR全覆盖（此前只看评分，漏过RSI66.5/ATR18.7%的LSK）
+            if analysis and analysis["can_buy"]:
                 c["trend_score"] = analysis["trend_score"]
                 c["atr_pct"] = analysis["atr_pct"]
                 c["rsi"] = analysis["rsi"]
@@ -917,12 +923,17 @@ class CryptoTracker:
 
             if pos:
                 # --- 持仓中 ---
-                # 补仓：止损价之上才允许补仓
-                for i, tr in enumerate(ep["tranches"]):
-                    if i < len(pos["tranches_done"]) and not pos["tranches_done"][i] and ep["stop"] < price <= tr["price"]:
-                        msg = self.buy_tranche(symbol, price, i, tr, budget_each)
-                        if msg:
-                            events.append({"symbol": symbol, "kind": "buy", "msg": msg})
+                # 补仓：止损价之上才允许补仓；同一轮只补一批，跳空穿过多个买点时
+                # 只补最深的一批（前序批次在buy_tranche内标记错过），防止一轮补满
+                trigger_idx = None
+                for i in range(len(ep["tranches"]) - 1, -1, -1):
+                    if i < len(pos["tranches_done"]) and not pos["tranches_done"][i] and ep["stop"] < price <= ep["tranches"][i]["price"]:
+                        trigger_idx = i
+                        break
+                if trigger_idx is not None:
+                    msg = self.buy_tranche(symbol, price, trigger_idx, ep["tranches"][trigger_idx], budget_each)
+                    if msg:
+                        events.append({"symbol": symbol, "kind": "buy", "msg": msg})
                 pos = self.state["positions"].get(symbol)
                 if pos:
                     avg = pos["cost"] / pos["amount"] if pos["amount"] else 0
@@ -943,6 +954,8 @@ class CryptoTracker:
                         # 设冷却期：48小时内不再建仓
                         cooldown_until = now + dt.timedelta(hours=COOLDOWN_HOURS)
                         self.state.setdefault("cooldown", {})[symbol] = cooldown_until.strftime("%Y-%m-%d %H:%M")
+                        # 立即落盘，防止止损后进程重启导致冷却丢失、重新进场（LINK事故教训）
+                        self.save_state()
 
                     # 止盈1：卖一半，止损上移成本价，记录峰值
                     elif not pos["tp1_done"] and price >= ep["tp1"]:
@@ -1108,11 +1121,34 @@ class CryptoTracker:
                 # 按分批买点建仓（仅当多时间框架允许建仓时）
                 analysis = analyze_symbol(symbol)
                 if analysis and analysis["can_buy"]:
-                    for i, tr in enumerate(ep["tranches"]):
-                        if price <= tr["price"]:
-                            msg = self.buy_tranche(symbol, price, i, tr, budget_each)
-                            if msg:
-                                events.append({"symbol": symbol, "kind": "buy", "msg": msg})
+                    tranches = ep["tranches"]
+                    # 保护1：跳空过深直接作废。现价低于第三批买点超过8%（或1个ATR），
+                    # 说明生成计划时的趋势/波动前提已经剧变（典型闪崩），作废不接飞刀（LSK事故教训）
+                    t3 = tranches[-1]["price"]
+                    # 双保险取更严格的线：偏离8% 或 跌破1个ATR，任一触及即作废
+                    void_line = t3 * (1 - GAP_VOID_PCT)
+                    if ep.get("atr"):
+                        void_line = max(void_line, t3 - ep["atr"])
+                    if price < void_line:
+                        self.state["plan_expired"][symbol] = True
+                        events.append({
+                            "symbol": symbol, "kind": "expire",
+                            "msg": "价格 {:.4f} 较第三批买点 {:.4f} 跳空过深（{:.1f}%，超过 {:.0f}% 安全阈值），计划依据的行情已剧变，作废不接飞刀".format(
+                                price, t3, (t3 / price - 1) * 100, GAP_VOID_PCT * 100)})
+                        self.try_replacement(symbol, plan["name"], events)
+                        continue
+                    # 保护2：同一轮只建一批；价格已穿过多个买点时只成交最深一批，
+                    # 前序批次在buy_tranche内标记为错过，杜绝重启/闪崩后三批同秒满仓
+                    # 保护3：止损价下方不建仓（与持仓补仓分支对齐）
+                    trigger_idx = None
+                    for i in range(len(tranches) - 1, -1, -1):
+                        if ep["stop"] < price <= tranches[i]["price"]:
+                            trigger_idx = i
+                            break
+                    if trigger_idx is not None:
+                        msg = self.buy_tranche(symbol, price, trigger_idx, tranches[trigger_idx], budget_each)
+                        if msg:
+                            events.append({"symbol": symbol, "kind": "buy", "msg": msg})
                 else:
                     # 趋势不允许建仓时，推送提示（每天最多1条）
                     today_str = now.date().isoformat()
@@ -1125,6 +1161,14 @@ class CryptoTracker:
                                 analysis["trend_score"],
                                 analysis["trend"]["daily"], analysis["trend"]["weekly"],
                                 analysis["rsi"])})
+
+        # 替换进来的新标的不在本轮行情中，补取行情，使推送能显示现价（无持仓浮盈为0）
+        for event in events:
+            if event["kind"] == "replace" and event["symbol"] not in quotes:
+                try:
+                    quotes[event["symbol"]] = fetch_ticker(event["symbol"])
+                except Exception:
+                    pass
 
         for event in events:
             position = self.state["positions"].get(event["symbol"])
@@ -1196,13 +1240,20 @@ class CryptoTracker:
         self.state["cash"] -= spend
         pos["amount"] += amount
         pos["cost"] += spend
+        # 价格直接跳到第index批区间时，前序批次已无成交机会，标记为"错过"，
+        # 防止后续轮询的补仓循环把前序批次追补回来（LSK三批同秒满仓教训）
+        skipped = [j for j in range(index) if not pos["tranches_done"][j]]
+        for j in skipped:
+            pos["tranches_done"][j] = True
         pos["tranches_done"][index] = True
         done = sum(pos["tranches_done"])
         total = len(pos["tranches_done"])
-        coin = PLANS[symbol]["name"]
-        msg = "{} 第{idx}批建仓 {pct:.0f}%：买入 {amount:.2f} 枚 @{price:.4f}，金额 {spend:.0f} USDT（已建仓 {done}/{total} 批，均价 {avg:.4f}）".format(
+        coin = self.effective_plan(symbol)["name"]
+        gap_note = "；价格跳空穿过前{}批买点，前{}批视为错过不再追买".format(
+            len(skipped), len(skipped)) if skipped else ""
+        msg = "{} 第{idx}批建仓 {pct:.0f}%：买入 {amount:.2f} 枚 @{price:.4f}，金额 {spend:.0f} USDT（已建仓 {done}/{total} 批，均价 {avg:.4f}）{note}".format(
             coin, idx=index + 1, pct=tranche["pct"] * 100, amount=amount, price=price,
-            spend=spend, done=done, total=total, avg=pos["cost"] / pos["amount"])
+            spend=spend, done=done, total=total, avg=pos["cost"] / pos["amount"], note=gap_note)
         self.record_trade(symbol, msg, action="buy", price=price, amount=amount, value=spend,
                           tranche=index + 1, plan_version=self.state.get("plan_id", PLAN_ID))
         return msg
@@ -1286,7 +1337,8 @@ class CryptoTracker:
             parts.append("<p style='color:#aaa;font-size:12px'>仅为程序模拟，不会真实下单。</p></div>")
             push_async("币·{}持仓汇总（本金{:.0f}U）".format(label, SIM_CAPITAL), "".join(parts))
             self.state["summary_pushes"][marker] = now.strftime("%Y-%m-%d %H:%M")
-        self.save_state()
+            # 仅在实际推送后落盘：定时线程与主循环共享state，无推送时写盘会产生无谓的文件竞争
+            self.save_state()
 
     def build_push_html(self, events, quotes):
         total = self.total_asset(quotes)
@@ -1350,7 +1402,7 @@ class CryptoTracker:
         pos["cost"] -= cost_part
         pnl = proceeds - cost_part
         msg = "{} {}，卖出 {:.2f} 枚 @{:.4f}，本批盈亏 {:+.2f} USDT".format(
-            reason, PLANS[symbol]["name"], amount, price, pnl)
+            reason, self.effective_plan(symbol)["name"], amount, price, pnl)
         self.record_trade(symbol, msg, action="sell", price=price, amount=amount,
                           value=proceeds, pnl=pnl, reason=reason,
                           plan_version=self.state.get("plan_id", PLAN_ID))
@@ -1482,7 +1534,30 @@ class CryptoTracker:
                 f.write("\n".join(archived) + "\n")
 
 
+# 单实例锁：占用一个本地端口，端口被占说明已有监控进程在跑。
+# 进程退出时操作系统自动释放端口，无锁文件残留问题。
+SINGLE_INSTANCE_PORT = 47841
+
+
+def ensure_single_instance():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
+    except OSError:
+        # 已有实例运行（pythonw 无控制台，弹窗提示）
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                0, "加密货币监控已在运行中，请勿重复启动。", "提示", 0x40)
+        except Exception:
+            print("另一个 crypto_tracker 实例已在运行，本进程退出。")
+        sys.exit(0)
+    sock.listen(1)
+    return sock
+
+
 def main():
+    instance_lock = ensure_single_instance()
     tracker = CryptoTracker()
     print("crypto tracker started, poll every {}s".format(POLL_SECONDS))
     while True:
