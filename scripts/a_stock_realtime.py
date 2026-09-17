@@ -1,6 +1,8 @@
 import datetime as dt
 import json
 import os
+import socket
+import sys
 import threading
 import urllib.parse
 import urllib.request
@@ -23,6 +25,7 @@ SIM_STATE_FILE = os.path.join(PLAN_DIR, "state.json")
 SIM_REPORT_FILE = os.path.join(PLAN_DIR, "report.md")
 SIM_REPORT_ARCHIVE_DIR = os.path.join(BASE_DIR, "stock_reports")
 REVIEW_DIR = os.path.join(BASE_DIR, "stock_reviews")
+SUMMARY_LOCK_DIR = os.path.join(BASE_DIR, "summary_locks")
 SIM_CAPITAL = float(PLAN_CONFIG["capital"])
 PLAN_ID = PLAN_CONFIG["plan_id"]
 PLAN_DATE = PLAN_CONFIG["plan_date"]
@@ -1578,10 +1581,54 @@ class StockFloatWindow:
         self.canvas.itemconfig(self.pct_text, text=pct, fill=color)
 
 
+SINGLE_INSTANCE_PORT = 47842
+
+
+def ensure_single_instance(cmd=None):
+    """首次启动绑定端口；已有实例则发送 cmd 后退出。"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
+    except OSError:
+        # 已有实例运行，尝试发送命令
+        if cmd:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(2)
+                s.connect(("127.0.0.1", SINGLE_INSTANCE_PORT))
+                s.sendall(cmd.encode("utf-8"))
+                s.close()
+            except Exception:
+                pass
+        sys.exit(0)
+    sock.listen(1)
+    return sock
+
+
+def start_ipc_listener(sock, root, float_window):
+    """监听后续实例发来的命令，在主线程执行。"""
+    def listener():
+        while True:
+            try:
+                conn, _ = sock.accept()
+                data = conn.recv(256).decode("utf-8").strip()
+                conn.close()
+                if data == "OPEN_SETTINGS":
+                    root.after(0, float_window.open_settings)
+            except Exception:
+                break
+    threading.Thread(target=listener, daemon=True).start()
+
+
 def main():
+    want_settings = "--open-settings" in sys.argv
+    instance_lock = ensure_single_instance("OPEN_SETTINGS" if want_settings else None)
     root = tk.Tk()
-    StockFloatWindow(root)
+    float_win = StockFloatWindow(root)
     SimulationTracker(root)
+    start_ipc_listener(instance_lock, root, float_win)
+    if want_settings:
+        root.after(500, float_win.open_settings)
     root.mainloop()
 
 
